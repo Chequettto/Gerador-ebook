@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Gerar E-book Completo</title>
+<style>
+  :root {
+    --bg: #f7f5f2; --card: #ffffff; --text: #2b2620; --muted: #746b5e;
+    --accent: #b5651d; --accent-dark: #8f4e15; --border: #e4ddd2;
+    --ok: #2e6b3e; --err: #a33a2a;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #221f1a; --card: #2c2820; --text: #efe9df; --muted: #b3a99a;
+      --border: #46402f; --accent: #e0954a;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: Georgia, serif; padding: 24px 16px 48px; }
+  .wrap { max-width: 660px; margin: 0 auto; }
+  h1 { font-size: 1.5rem; margin-bottom: 4px; }
+  p.sub { color: var(--muted); margin-top: 0; font-size: 0.95rem; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 18px; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .row > div { flex: 1; min-width: 140px; }
+  label { display: block; font-size: 0.85rem; color: var(--muted); margin: 10px 0 4px; }
+  input, select { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: var(--text); font-family: inherit; font-size: 1rem; }
+  select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23746b5e' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; padding-right: 34px; }
+  button { margin-top: 18px; width: 100%; padding: 15px; border: none; border-radius: 8px; background: var(--accent); color: white; font-size: 1.1rem; font-weight: bold; cursor: pointer; }
+  button:active { background: var(--accent-dark); }
+  button:disabled { opacity: 0.6; cursor: default; }
+  .stepper { display: flex; align-items: center; gap: 0; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .stepper button.step-btn { margin: 0; width: 46px; flex: none; padding: 10px 0; font-size: 1.3rem; border-radius: 0; background: var(--card); color: var(--accent); border-right: 1px solid var(--border); }
+  .stepper button.step-btn:last-child { border-right: none; border-left: 1px solid var(--border); }
+  .stepper input { border: none; text-align: center; border-radius: 0; flex: 1; padding: 10px 4px; }
+  .stepper-hint { font-size: 0.78rem; color: var(--muted); margin-top: 4px; }
+  .progress { margin-top: 16px; }
+  .step { padding: 8px 0; font-size: 0.92rem; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 10px; }
+  .step .state { color: var(--muted); white-space: nowrap; }
+  .step.done .state { color: var(--ok); }
+  .step.err .state { color: var(--err); }
+  .downloads { margin-top: 16px; display: none; }
+  .downloads a { display: block; text-align: center; padding: 12px; margin-bottom: 10px; border-radius: 8px; background: var(--ok); color: white; text-decoration: none; font-weight: bold; }
+  .cover-preview { max-width: 160px; border-radius: 8px; display: block; margin: 10px auto; }
+  .errbox { color: var(--err); font-size: 0.9rem; margin-top: 10px; }
+  .section-title { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin: 18px 0 2px; border-top: 1px solid var(--border); padding-top: 14px; }
+  .section-title:first-child { margin-top: 0; border-top: none; padding-top: 0; }
+  .outline-box { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-top: 10px; font-size: 0.9rem; display: none; }
+  .outline-box h4 { margin: 0 0 6px; font-size: 0.95rem; }
+  .outline-box ol { margin: 6px 0 0; padding-left: 20px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>📚 Gerar E-book Completo</h1>
+  <p class="sub">Você só digita o essencial. Idioma, tamanho e capítulos são por seleção — o subtítulo e os títulos dos capítulos a IA cria sozinha.</p>
+
+  <div class="card">
+    <label for="baseUrl">Endereço do seu site (Render) — já preenchido sozinho</label>
+    <input id="baseUrl" placeholder="https://cheketo-book-forge.onrender.com" />
+
+    <div class="section-title">O essencial (só isso pra digitar)</div>
+    <label for="bookTitle">Título do livro</label>
+    <input id="bookTitle" placeholder="ex: Domine suas Finanças" value="Domine suas Finanças" />
+
+    <label for="author">Nome do autor</label>
+    <input id="author" placeholder="ex: Seu nome" value="Autor" />
+
+    <label for="niche">Nicho / assunto do livro</label>
+    <input id="niche" placeholder="ex: finanças pessoais" value="finanças pessoais" />
+
+    <label for="audience">Para quem é o livro (público-alvo)</label>
+    <input id="audience" placeholder="ex: jovens que querem sair das dívidas" value="jovens que querem sair das dívidas" />
+
+    <div class="section-title">Escolha nos botões</div>
+    <div class="row">
+      <div>
+        <label for="language">Idioma</label>
+        <select id="language">
+          <option value="português do Brasil" selected>Português (Brasil)</option>
+          <option value="português de Portugal">Português (Portugal)</option>
+          <option value="inglês">Inglês</option>
+          <option value="espanhol">Espanhol</option>
+          <option value="francês">Francês</option>
+        </select>
+      </div>
+      <div>
+        <label for="tone">Tom do texto</label>
+        <select id="tone">
+          <option value="acolhedor e direto" selected>Acolhedor e direto</option>
+          <option value="formal e profissional">Formal e profissional</option>
+          <option value="casual e descontraído">Casual e descontraído</option>
+          <option value="inspirador e motivacional">Inspirador e motivacional</option>
+          <option value="técnico e objetivo">Técnico e objetivo</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="row">
+      <div>
+        <label for="numChapters">Número de capítulos</label>
+        <div class="stepper">
+          <button type="button" class="step-btn" onclick="mudarValor('numChapters',-1,1,30)">−</button>
+          <input id="numChapters" type="number" min="1" max="30" value="5" readonly />
+          <button type="button" class="step-btn" onclick="mudarValor('numChapters',1,1,30)">+</button>
+        </div>
+      </div>
+      <div>
+        <label for="pagesPerChapter">Páginas por capítulo</label>
+        <div class="stepper">
+          <button type="button" class="step-btn" onclick="mudarValor('pagesPerChapter',-1,1,30)">−</button>
+          <input id="pagesPerChapter" type="number" min="1" max="30" value="8" readonly />
+          <button type="button" class="step-btn" onclick="mudarValor('pagesPerChapter',1,1,30)">+</button>
+        </div>
+      </div>
+    </div>
+    <p class="stepper-hint" id="totalEstimate">Total estimado: 5 capítulos × 8 páginas ≈ 40 páginas no livro</p>
+
+    <label for="coverStyle">Estilo da capa</label>
+    <select id="coverStyle">
+      <option value="minimalista, cores elegantes" selected>Minimalista</option>
+      <option value="colorida e vibrante">Colorida e vibrante</option>
+      <option value="fotorrealista, clima sofisticado">Fotorrealista sofisticada</option>
+      <option value="aquarela, tons suaves">Aquarela suave</option>
+      <option value="moderna, tons escuros e neon">Moderna / escura</option>
+    </select>
+
+    <button id="btnTeste" onclick="testeRapido()" style="background:#5b7a9d;">🔍 Teste rápido (1 bloco, ~20 segundos)</button>
+    <div id="statusTeste" style="font-size:0.85rem;margin-top:6px;min-height:1.2em;"></div>
+
+    <button id="btnGerar" onclick="gerarLivroCompleto()">Gerar o e-book completo</button>
+
+    <div id="outlineBox" class="outline-box">
+      <h4>📝 Sumário criado pela IA:</h4>
+      <div id="outlineSubtitle"></div>
+      <ol id="outlineChapters"></ol>
+    </div>
+
+    <div id="progress" class="progress"></div>
+    <div id="errbox" class="errbox"></div>
+    <img id="coverPreview" class="cover-preview" style="display:none" />
+    <div id="downloads" class="downloads"></div>
+  </div>
+</div>
+
+<script>
+function mudarValor(id, delta, min, max) {
+  const el = document.getElementById(id);
+  let v = (Number(el.value) || min) + delta;
+  if (v < min) v = min;
+  if (v > max) v = max;
+  el.value = v;
+  atualizarEstimativa();
+}
+
+function atualizarEstimativa() {
+  const chapters = Number(document.getElementById('numChapters').value) || 1;
+  const pages = Number(document.getElementById('pagesPerChapter').value) || 1;
+  const totalPages = chapters * pages;
+  const totalWords = totalPages * 400;
+  document.getElementById('totalEstimate').textContent =
+    'Total estimado: ' + chapters + ' capítulos × ' + pages + ' páginas ≈ ' + totalPages +
+    ' páginas no livro (~' + totalWords.toLocaleString('pt-BR') + ' palavras)';
+}
+
+async function testeRapido() {
+  const base = getBase();
+  const btn = document.getElementById('btnTeste');
+  const statusEl = document.getElementById('statusTeste');
+  if (!base) { statusEl.textContent = '❌ Cole o endereço do site primeiro.'; statusEl.style.color = 'var(--err)'; return; }
+
+  btn.disabled = true;
+  statusEl.style.color = 'var(--muted)';
+  statusEl.textContent = '⏳ Testando conexão com o servidor (pode demorar até 1 minuto se ele estava "dormindo")...';
+
+  try {
+    const res = await fetch(base + '/api/generate-block', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        bookTitle: 'Teste', chapterTitle: 'Capítulo de Teste', blockNumber: 1, blocksPerChapter: 1,
+        niche: document.getElementById('niche').value || 'teste',
+        targetAudience: document.getElementById('audience').value || 'teste',
+        tone: 'direto', recentContext: ''
+      })
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data || !data.success) {
+      throw new Error((data && (data.error || data.details)) || ('Erro HTTP ' + res.status + ' — o servidor respondeu, mas com problema.'));
+    }
+    statusEl.style.color = 'var(--ok)';
+    statusEl.textContent = '✅ Conexão funcionando! O servidor gerou texto normalmente. Pode usar o botão de baixo com confiança.';
+  } catch (err) {
+    statusEl.style.color = 'var(--err)';
+    if (err.message === 'Failed to fetch') {
+      statusEl.textContent = '❌ Não conseguiu nem conversar com o servidor. Confira se o endereço está certo e sem erro de digitação, e se o serviço está "Live" no Render.';
+    } else {
+      statusEl.textContent = '❌ ' + err.message;
+    }
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function getBase() {
+  const v = document.getElementById('baseUrl').value.trim().replace(/\/$/, '');
+  const finalBase = v || window.location.origin;
+  try { localStorage.setItem('gerador_base_url', finalBase); } catch (e) {}
+  return finalBase;
+}
+window.addEventListener('DOMContentLoaded', () => {
+  const baseInput = document.getElementById('baseUrl');
+  if (!window.location.href.startsWith('file://')) {
+    baseInput.value = window.location.origin;
+    baseInput.placeholder = 'Detectado automaticamente: ' + window.location.origin;
+  }
+  try {
+    const saved = localStorage.getItem('gerador_base_url');
+    if (saved && !baseInput.value) baseInput.value = saved;
+  } catch (e) {}
+  atualizarEstimativa();
+});
+
+function addStep(id, label) {
+  const el = document.createElement('div');
+  el.className = 'step';
+  el.id = 'step-' + id;
+  el.innerHTML = '<span class="label">' + label + '</span><span class="state">aguardando...</span>';
+  document.getElementById('progress').appendChild(el);
+  return el;
+}
+function setStep(id, state, cls) {
+  const el = document.getElementById('step-' + id);
+  if (!el) return;
+  el.querySelector('.state').textContent = state;
+  el.className = 'step' + (cls ? ' ' + cls : '');
+}
+
+function base64ToBlob(base64, mime) {
+  const bytes = atob(base64);
+  const arr = new Uint8Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+  return new Blob([arr], { type: mime });
+}
+
+async function gerarBloco(base, params) {
+  const res = await fetch(base + '/api/generate-block', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params)
+  });
+  const data = await res.json();
+  if (!res.ok || !data.success) throw new Error(data.error || data.details || ('Erro HTTP ' + res.status));
+  return data.text;
+}
+
+async function gerarLivroCompleto() {
+  const base = getBase();
+  const btn = document.getElementById('btnGerar');
+  const progress = document.getElementById('progress');
+  const errbox = document.getElementById('errbox');
+  const downloads = document.getElementById('downloads');
+  const coverPreview = document.getElementById('coverPreview');
+  const outlineBox = document.getElementById('outlineBox');
+  progress.innerHTML = '';
+  errbox.textContent = '';
+  downloads.style.display = 'none';
+  downloads.innerHTML = '';
+  coverPreview.style.display = 'none';
+  outlineBox.style.display = 'none';
+
+  if (!base) { errbox.textContent = 'Cole o endereço do site primeiro.'; return; }
+
+  const bookTitle = document.getElementById('bookTitle').value.trim();
+  const author = document.getElementById('author').value.trim() || 'Autor';
+  const niche = document.getElementById('niche').value.trim();
+  const audience = document.getElementById('audience').value.trim();
+  const language = document.getElementById('language').value;
+  const tone = document.getElementById('tone').value;
+  const numChapters = Number(document.getElementById('numChapters').value);
+  const blocksPerChapter = Number(document.getElementById('pagesPerChapter').value);
+  const coverStyle = document.getElementById('coverStyle').value;
+
+  if (!bookTitle || !niche || !audience) {
+    errbox.textContent = 'Preencha ao menos título, nicho e público-alvo.';
+    return;
+  }
+
+  btn.disabled = true;
+  const stepOutline = addStep('outline', 'Criando sumário e títulos dos capítulos (IA)');
+  const stepCover = addStep('cover', 'Gerando capa');
+
+  try {
+    // 0) Sumário automático (subtítulo + capítulos), feito pela IA
+    const outlineRes = await fetch(base + '/api/generate-outline', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bookTitle, niche, targetAudience: audience, tone, numChapters, language })
+    });
+    const outlineData = await outlineRes.json();
+    if (!outlineRes.ok || !outlineData.success) throw new Error(outlineData.error || outlineData.details || 'Falha ao criar o sumário automático.');
+    setStep('outline', 'pronto ✅', 'done');
+
+    const subtitle = outlineData.subtitle || '';
+    const bookDescription = outlineData.description || '';
+    const chapterTitles = outlineData.chapters;
+
+    document.getElementById('outlineSubtitle').textContent = subtitle ? ('Subtítulo: ' + subtitle) : '';
+    document.getElementById('outlineChapters').innerHTML = chapterTitles.map(c => '<li>' + c + '</li>').join('');
+    outlineBox.style.display = 'block';
+
+    const chapterSteps = chapterTitles.map((t, i) => addStep('ch' + i, t));
+    const stepBuild = addStep('build', 'Montando PDF e EPUB');
+
+    // 1) Capa
+    let coverUrl = null;
+    try {
+      const res = await fetch(base + '/api/generate-cover', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: bookTitle, niche, stylePreference: coverStyle })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        coverUrl = data.url;
+        setStep('cover', 'pronta ✅', 'done');
+        coverPreview.src = coverUrl;
+        coverPreview.style.display = 'block';
+      } else {
+        setStep('cover', 'falhou, seguindo sem capa', 'err');
+      }
+    } catch (e) {
+      setStep('cover', 'falhou, seguindo sem capa', 'err');
+    }
+
+    // 2) Capítulos
+    const chapters = [];
+    for (let i = 0; i < chapterTitles.length; i++) {
+      const chapterTitle = chapterTitles[i];
+      let fullText = '';
+      for (let block = 1; block <= blocksPerChapter; block++) {
+        setStep('ch' + i, 'gerando bloco ' + block + '/' + blocksPerChapter + '...');
+        const recentContext = fullText.slice(-1200);
+        const text = await gerarBloco(base, {
+          bookTitle, chapterTitle, blockNumber: block, blocksPerChapter,
+          niche, targetAudience: audience, tone, recentContext, bookDescription, language
+        });
+        fullText += (fullText ? '\n\n' : '') + text;
+      }
+      chapters.push({ position: i + 1, title: chapterTitle, content: fullText });
+      setStep('ch' + i, 'pronto ✅', 'done');
+    }
+
+    // 3) Montar PDF/EPUB
+    setStep('build', 'montando...');
+    const buildRes = await fetch(base + '/api/build-book', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: bookTitle, subtitle, author, chapters, coverUrl })
+    });
+    const buildData = await buildRes.json();
+    if (!buildRes.ok || !buildData.success) throw new Error(buildData.error || buildData.details || 'Falha ao montar o livro.');
+    setStep('build', 'pronto ✅', 'done');
+
+    const pdfBlob = base64ToBlob(buildData.pdfBase64, 'application/pdf');
+    const epubBlob = base64ToBlob(buildData.epubBase64, 'application/epub+zip');
+
+    const linkPdf = document.createElement('a');
+    linkPdf.href = URL.createObjectURL(pdfBlob);
+    linkPdf.download = bookTitle.replace(/[^a-z0-9]+/gi, '-').toLowerCase() + '.pdf';
+    linkPdf.textContent = '⬇️ Baixar PDF do livro completo';
+
+    const linkEpub = document.createElement('a');
+    linkEpub.href = URL.createObjectURL(epubBlob);
+    linkEpub.download = bookTitle.replace(/[^a-z0-9]+/gi, '-').toLowerCase() + '.epub';
+    linkEpub.textContent = '⬇️ Baixar EPUB do livro completo';
+
+    downloads.appendChild(linkPdf);
+    downloads.appendChild(linkEpub);
+    downloads.style.display = 'block';
+  } catch (err) {
+    errbox.textContent = '❌ Erro: ' + err.message + ' (o que já foi gerado antes não se perdeu, pode tentar de novo)';
+  } finally {
+    btn.disabled = false;
+  }
+}
+</script>
+</body>
+</html>

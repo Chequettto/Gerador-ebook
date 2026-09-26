@@ -1,0 +1,22 @@
+{
+  "name": "ebook-ai-backend",
+  "version": "1.0.0",
+  "description": "Backend de geração automatizada de e-books via esteira tripla de IAs (Gemini + Groq + Mistral) com anel de resiliência de 18 chaves, pronto para deploy no Render.",
+  "main": "server.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "node-fetch": "^2.7.0",
+    "pdf-lib": "^1.17.1",
+    "fflate": "^0.8.2"
+  }
+}
