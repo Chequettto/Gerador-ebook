@@ -138,7 +138,7 @@ async function callGroqOnce(apiKey, prompt) {
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
+        model: 'openai/gpt-oss-120b',
         temperature: 0.85,
         max_tokens: 2048,
         messages: [{ role: 'user', content: prompt }],
@@ -217,12 +217,16 @@ const CALLERS = {
 // -----------------------------------------------------------------------
 async function callWithFullResilience(providerOrder, prompt, roleLabel) {
   let lastError = null;
+  const firstErrorPerProvider = {};
 
   for (let round = 1; round <= MAX_GLOBAL_ROUNDS; round += 1) {
     for (const provider of providerOrder) {
       const pool = pools[provider];
       const caller = CALLERS[provider];
-      if (!pool || pool.length === 0) continue; // provedor sem chaves configuradas, pula
+      if (!pool || pool.length === 0) {
+        if (!firstErrorPerProvider[provider]) firstErrorPerProvider[provider] = 'nenhuma chave configurada';
+        continue; // provedor sem chaves configuradas, pula
+      }
 
       const startIndex = nextStartIndex(provider);
       for (let offset = 0; offset < pool.length; offset += 1) {
@@ -235,6 +239,7 @@ async function callWithFullResilience(providerOrder, prompt, roleLabel) {
           return result;
         } catch (error) {
           lastError = error;
+          if (!firstErrorPerProvider[provider]) firstErrorPerProvider[provider] = error.message;
           log(roleLabel, `Falha em ${provider} chave #${keyIndex + 1}: ${error.message}.`);
         }
       }
@@ -253,11 +258,15 @@ async function callWithFullResilience(providerOrder, prompt, roleLabel) {
     await sleep(TECHNICAL_PAUSE_MS);
   }
 
-  // Esgotou as rodadas com as 18 chaves: desiste deste bloco de forma controlada.
+  // Esgotou as rodadas com as 18 chaves: desiste deste bloco de forma controlada,
+  // mostrando o erro real de CADA provedor (não só o último), para dar
+  // diagnóstico de verdade em vez de uma mensagem genérica de "sem cota".
+  const providerDetails = Object.entries(firstErrorPerProvider)
+    .map(([provider, msg]) => `${provider.toUpperCase()}: ${msg}`)
+    .join(' | ');
+
   const finalError = new Error(
-    `As 18 chaves (Gemini + Groq + Mistral) falharam após ${MAX_GLOBAL_ROUNDS} rodadas para a etapa "${roleLabel}". ` +
-      `Último erro: ${lastError ? lastError.message : 'desconhecido'}. ` +
-      `Tente novamente este mesmo bloco mais tarde — os blocos já gerados com sucesso não são perdidos.`
+    `As 18 chaves falharam na etapa "${roleLabel}". Detalhe por provedor -> ${providerDetails || 'sem detalhes'}`
   );
   finalError.retryable = true;
   throw finalError;
@@ -272,7 +281,7 @@ function buildArchitectPrompt({ bookTitle, chapterTitle, blockNumber, niche, tar
   return `Você é um autor especialista em "${niche}", escrevendo um e-book profissional chamado "${bookTitle}", em ${lang}.
 ${bookDescription ? `\nSOBRE O LIVRO: ${bookDescription}\n` : ''}
 CAPÍTULO ATUAL: "${chapterTitle}"
-BLOCO: ${blockNumber} de ${blocksPerChapter || 8} (aproximadamente 350 a 400 palavras neste bloco)
+BLOCO: ${blockNumber} de ${blocksPerChapter || 6} (aproximadamente 300 palavras neste bloco)
 PÚBLICO-ALVO: ${targetAudience}
 TOM DESEJADO: ${tone}
 
@@ -282,7 +291,7 @@ ${recentContext || '(Este é o primeiro bloco do capítulo — não há contexto
 """
 
 TAREFA:
-Escreva o conteúdo bruto e denso deste bloco, com profundidade real de conteúdo (não superficial), trazendo exemplos, raciocínios e informação de valor prático sobre "${niche}" para o público "${targetAudience}". Mantenha continuidade natural com o contexto anterior, sem repetir o que já foi dito. Não escreva título do capítulo nem numeração de bloco — apenas o texto corrido. Extensão alvo: 350 a 400 palavras.`;
+Escreva o conteúdo bruto e denso deste bloco, com profundidade real de conteúdo (não superficial), trazendo exemplos, raciocínios e informação de valor prático sobre "${niche}" para o público "${targetAudience}". Mantenha continuidade natural com o contexto anterior, sem repetir o que já foi dito. Não escreva título do capítulo nem numeração de bloco — apenas o texto corrido. Extensão alvo: cerca de 300 palavras.`;
 }
 
 function buildRefineAndHumanizePrompt({ bookTitle, chapterTitle, niche, targetAudience, tone, draftText }) {

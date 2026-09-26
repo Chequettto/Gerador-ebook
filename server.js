@@ -79,7 +79,7 @@ app.post('/api/generate-block', async (req, res) => {
   }
 
   const blockNum = Number(blockNumber);
-  const maxBlocks = Number(blocksPerChapter) || 8;
+  const maxBlocks = Number(blocksPerChapter) || 6;
   if (!Number.isInteger(blockNum) || blockNum < 1 || blockNum > 30) {
     return res.status(400).json({
       error: 'blockNumber deve ser um número inteiro entre 1 e 30.',
