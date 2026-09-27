@@ -257,6 +257,27 @@ async function gerarBloco(base, params) {
   return data.text;
 }
 
+const PROGRESS_KEY = 'gerador_progress_v1';
+
+function progressSignature(p) {
+  return [p.bookTitle, p.niche, p.audience, p.tone, p.numChapters, p.blocksPerChapter, p.language, p.coverStyle].join('|');
+}
+function loadProgress(signature) {
+  try {
+    const raw = localStorage.getItem(PROGRESS_KEY);
+    if (!raw) return null;
+    const saved = JSON.parse(raw);
+    if (saved.signature !== signature) return null;
+    return saved;
+  } catch (e) { return null; }
+}
+function saveProgress(data) {
+  try { localStorage.setItem(PROGRESS_KEY, JSON.stringify(data)); } catch (e) {}
+}
+function clearProgress() {
+  try { localStorage.removeItem(PROGRESS_KEY); } catch (e) {}
+}
+
 async function gerarLivroCompleto() {
   const base = getBase();
   const btn = document.getElementById('btnGerar');
@@ -289,23 +310,40 @@ async function gerarLivroCompleto() {
     return;
   }
 
+  const signature = progressSignature({ bookTitle, niche, audience, tone, numChapters, blocksPerChapter, language, coverStyle });
+  let saved = loadProgress(signature);
+  const isResuming = !!saved;
+
   btn.disabled = true;
   const stepOutline = addStep('outline', 'Criando sumário e títulos dos capítulos (IA)');
   const stepCover = addStep('cover', 'Gerando capa');
 
   try {
-    // 0) Sumário automático (subtítulo + capítulos), feito pela IA
-    const outlineRes = await fetch(base + '/api/generate-outline', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bookTitle, niche, targetAudience: audience, tone, numChapters, language })
-    });
-    const outlineData = await outlineRes.json();
-    if (!outlineRes.ok || !outlineData.success) throw new Error(outlineData.details || outlineData.error || 'Falha ao criar o sumário automático.');
-    setStep('outline', 'pronto ✅', 'done');
+    let subtitle, bookDescription, chapterTitles;
 
-    const subtitle = outlineData.subtitle || '';
-    const bookDescription = outlineData.description || '';
-    const chapterTitles = outlineData.chapters;
+    if (isResuming && saved.subtitle !== undefined) {
+      // Retomando: já tínhamos o sumário, não gasta IA de novo com isso.
+      subtitle = saved.subtitle;
+      bookDescription = saved.bookDescription;
+      chapterTitles = saved.chapterTitles;
+      setStep('outline', 'reaproveitado (retomando de onde parou) ✅', 'done');
+    } else {
+      // 0) Sumário automático (subtítulo + capítulos), feito pela IA
+      const outlineRes = await fetch(base + '/api/generate-outline', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bookTitle, niche, targetAudience: audience, tone, numChapters, language })
+      });
+      const outlineData = await outlineRes.json();
+      if (!outlineRes.ok || !outlineData.success) throw new Error(outlineData.details || outlineData.error || 'Falha ao criar o sumário automático.');
+      setStep('outline', 'pronto ✅', 'done');
+
+      subtitle = outlineData.subtitle || '';
+      bookDescription = outlineData.description || '';
+      chapterTitles = outlineData.chapters;
+
+      saved = { signature, subtitle, bookDescription, chapterTitles, coverUrl: null, chapters: [] };
+      saveProgress(saved);
+    }
 
     document.getElementById('outlineSubtitle').textContent = subtitle ? ('Subtítulo: ' + subtitle) : '';
     document.getElementById('outlineChapters').innerHTML = chapterTitles.map(c => '<li>' + c + '</li>').join('');
@@ -314,29 +352,41 @@ async function gerarLivroCompleto() {
     const chapterSteps = chapterTitles.map((t, i) => addStep('ch' + i, t));
     const stepBuild = addStep('build', 'Montando PDF e EPUB');
 
-    // 1) Capa
-    let coverUrl = null;
-    try {
-      const res = await fetch(base + '/api/generate-cover', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: bookTitle, niche, stylePreference: coverStyle })
-      });
-      const data = await res.json();
-      if (res.ok && data.success) {
-        coverUrl = data.url;
-        setStep('cover', 'pronta ✅', 'done');
-        coverPreview.src = coverUrl;
-        coverPreview.style.display = 'block';
-      } else {
+    // 1) Capa (pula se já tiver sido gerada numa tentativa anterior)
+    let coverUrl = saved.coverUrl || null;
+    if (coverUrl) {
+      setStep('cover', 'reaproveitada (retomando) ✅', 'done');
+      coverPreview.src = coverUrl;
+      coverPreview.style.display = 'block';
+    } else {
+      try {
+        const res = await fetch(base + '/api/generate-cover', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: bookTitle, niche, stylePreference: coverStyle })
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          coverUrl = data.url;
+          setStep('cover', 'pronta ✅', 'done');
+          coverPreview.src = coverUrl;
+          coverPreview.style.display = 'block';
+          saved.coverUrl = coverUrl;
+          saveProgress(saved);
+        } else {
+          setStep('cover', 'falhou, seguindo sem capa', 'err');
+        }
+      } catch (e) {
         setStep('cover', 'falhou, seguindo sem capa', 'err');
       }
-    } catch (e) {
-      setStep('cover', 'falhou, seguindo sem capa', 'err');
     }
 
-    // 2) Capítulos
-    const chapters = [];
+    // 2) Capítulos — pula os que já estiverem prontos de uma tentativa anterior
+    const chapters = saved.chapters || [];
     for (let i = 0; i < chapterTitles.length; i++) {
+      if (chapters[i] && chapters[i].content) {
+        setStep('ch' + i, 'reaproveitado (retomando) ✅', 'done');
+        continue;
+      }
       const chapterTitle = chapterTitles[i];
       let fullText = '';
       for (let block = 1; block <= blocksPerChapter; block++) {
@@ -344,12 +394,15 @@ async function gerarLivroCompleto() {
         const recentContext = fullText.slice(-1200);
         const text = await gerarBloco(base, {
           bookTitle, chapterTitle, blockNumber: block, blocksPerChapter,
-          niche, targetAudience: audience, tone, recentContext, bookDescription, language
+          niche, targetAudience: audience, tone, recentContext, bookDescription, language,
+          allChapterTitles: chapterTitles
         });
         fullText += (fullText ? '\n\n' : '') + text;
       }
-      chapters.push({ position: i + 1, title: chapterTitle, content: fullText });
+      chapters[i] = { position: i + 1, title: chapterTitle, content: fullText };
       setStep('ch' + i, 'pronto ✅', 'done');
+      saved.chapters = chapters;
+      saveProgress(saved); // salva assim que cada capítulo termina, não só no final
     }
 
     // 3) Montar PDF/EPUB
@@ -378,8 +431,10 @@ async function gerarLivroCompleto() {
     downloads.appendChild(linkPdf);
     downloads.appendChild(linkEpub);
     downloads.style.display = 'block';
+
+    clearProgress(); // livro terminado com sucesso — não precisa mais retomar nada
   } catch (err) {
-    errbox.textContent = '❌ Erro: ' + err.message + ' (o que já foi gerado antes não se perdeu, pode tentar de novo)';
+    errbox.textContent = '❌ Erro: ' + err.message + ' (o que já foi gerado fica salvo — clique em "Gerar" de novo para continuar exatamente de onde parou, sem repetir capa nem capítulos já prontos)';
   } finally {
     btn.disabled = false;
   }

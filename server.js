@@ -9,6 +9,7 @@ const path = require('path');
 const { generateBlock, generateOutline, pools } = require('./aiService');
 const { generateCoverUrl } = require('./coverService');
 const { buildPdf, buildEpub } = require('./bookBuildService');
+const { PLANS, findOrCreateCustomer, createLifetimeCharge, createMonthlySubscription, getPaymentStatus } = require('./asaasService');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -61,7 +62,7 @@ app.get('/api/health', (req, res) => {
 // para nunca ultrapassar o timeout de 30s do Render.
 // ---------------------------------------------------------------------------
 app.post('/api/generate-block', async (req, res) => {
-  const { bookTitle, chapterTitle, blockNumber, niche, targetAudience, tone, recentContext, bookDescription, blocksPerChapter, language } = req.body || {};
+  const { bookTitle, chapterTitle, blockNumber, niche, targetAudience, tone, recentContext, bookDescription, blocksPerChapter, language, allChapterTitles } = req.body || {};
 
   const missing = [];
   if (!bookTitle) missing.push('bookTitle');
@@ -98,6 +99,7 @@ app.post('/api/generate-block', async (req, res) => {
       bookDescription: bookDescription || '',
       blocksPerChapter: maxBlocks,
       language: language || 'português do Brasil',
+      allChapterTitles: Array.isArray(allChapterTitles) ? allChapterTitles : [],
     });
 
     return res.json({
@@ -264,6 +266,71 @@ app.post('/api/build-book', async (req, res) => {
       details: error.message,
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/create-payment
+// Cria (ou reaproveita) o cliente no Asaas e gera uma cobrança (plano mensal
+// ou vitalício), retornando o link de pagamento (PIX, boleto ou cartão).
+// Body: { name, email, cpfCnpj, plan: "monthly" | "lifetime" }
+// ---------------------------------------------------------------------------
+app.post('/api/create-payment', async (req, res) => {
+  const { name, email, cpfCnpj, plan } = req.body || {};
+
+  const missing = [];
+  if (!name) missing.push('name');
+  if (!email) missing.push('email');
+  if (!cpfCnpj) missing.push('cpfCnpj');
+  if (!plan) missing.push('plan');
+  if (missing.length > 0) {
+    return res.status(400).json({ error: 'Campos obrigatórios ausentes.', missingFields: missing });
+  }
+  if (plan !== 'monthly' && plan !== 'lifetime') {
+    return res.status(400).json({ error: 'plan deve ser "monthly" ou "lifetime".' });
+  }
+
+  try {
+    const customerId = await findOrCreateCustomer({ name, email, cpfCnpj });
+    const externalReference = `${email}-${Date.now()}`;
+    const description = `Gerador de E-book — ${PLANS[plan].label}`;
+
+    const result =
+      plan === 'lifetime'
+        ? await createLifetimeCharge({ customerId, description, externalReference })
+        : await createMonthlySubscription({ customerId, description, externalReference });
+
+    return res.json({ success: true, plan, ...result });
+  } catch (error) {
+    console.error('Erro ao criar cobrança Asaas:', error);
+    return res.status(500).json({ success: false, error: 'Falha ao criar a cobrança.', details: error.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/payment-status/:id
+// Consulta o status de um pagamento (PENDING, RECEIVED, CONFIRMED, OVERDUE...).
+// ---------------------------------------------------------------------------
+app.get('/api/payment-status/:id', async (req, res) => {
+  try {
+    const status = await getPaymentStatus(req.params.id);
+    return res.json({ success: true, ...status });
+  } catch (error) {
+    console.error('Erro ao consultar pagamento:', error);
+    return res.status(500).json({ success: false, error: 'Falha ao consultar o pagamento.', details: error.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/asaas-webhook
+// Recebe as notificações automáticas do Asaas quando um pagamento muda de
+// status (confirmado, atrasado, etc). Configure esta URL no painel do Asaas:
+// Configurações -> Webhooks -> https://SEU-APP.onrender.com/api/asaas-webhook
+// ---------------------------------------------------------------------------
+app.post('/api/asaas-webhook', (req, res) => {
+  const event = req.body || {};
+  console.log('📩 Webhook Asaas recebido:', event.event, '-', event.payment && event.payment.id);
+  // Aqui é onde, no futuro, se marcaria o pedido como pago no seu banco de dados.
+  res.status(200).json({ received: true });
 });
 
 // ---------------------------------------------------------------------------

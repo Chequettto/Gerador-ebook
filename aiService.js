@@ -276,22 +276,25 @@ async function callWithFullResilience(providerOrder, prompt, roleLabel) {
 // Construtores de prompt dinâmicos por etapa, adaptados a niche/tone/audience
 // -----------------------------------------------------------------------
 
-function buildArchitectPrompt({ bookTitle, chapterTitle, blockNumber, niche, targetAudience, tone, recentContext, bookDescription, blocksPerChapter, language }) {
+function buildArchitectPrompt({ bookTitle, chapterTitle, blockNumber, niche, targetAudience, tone, recentContext, bookDescription, blocksPerChapter, language, allChapterTitles }) {
   const lang = language || 'português do Brasil';
+  const otherChapters = Array.isArray(allChapterTitles)
+    ? allChapterTitles.filter((t) => t !== chapterTitle)
+    : [];
   return `Você é um autor especialista em "${niche}", escrevendo um e-book profissional chamado "${bookTitle}", em ${lang}.
 ${bookDescription ? `\nSOBRE O LIVRO: ${bookDescription}\n` : ''}
 CAPÍTULO ATUAL: "${chapterTitle}"
 BLOCO: ${blockNumber} de ${blocksPerChapter || 6} (aproximadamente 300 palavras neste bloco)
 PÚBLICO-ALVO: ${targetAudience}
 TOM DESEJADO: ${tone}
-
-CONTEXTO RECENTE (o que já foi escrito nos blocos anteriores, para dar continuidade sem repetir):
+${otherChapters.length > 0 ? `\nOUTROS CAPÍTULOS DO MESMO LIVRO (não repita o conteúdo específico deles aqui — cada capítulo deve trazer algo NOVO):\n${otherChapters.map((t) => `- ${t}`).join('\n')}\n` : ''}
+CONTEXTO RECENTE (o que já foi escrito nos blocos anteriores deste capítulo, para dar continuidade sem repetir):
 """
 ${recentContext || '(Este é o primeiro bloco do capítulo — não há contexto anterior.)'}
 """
 
 TAREFA:
-Escreva o conteúdo bruto e denso deste bloco, com profundidade real de conteúdo (não superficial), trazendo exemplos, raciocínios e informação de valor prático sobre "${niche}" para o público "${targetAudience}". Mantenha continuidade natural com o contexto anterior, sem repetir o que já foi dito. Não escreva título do capítulo nem numeração de bloco — apenas o texto corrido. Extensão alvo: cerca de 300 palavras.`;
+Escreva o conteúdo bruto e denso deste bloco, com profundidade real de conteúdo (não superficial), trazendo exemplos, raciocínios e informação de valor prático sobre "${niche}" para o público "${targetAudience}". Foque SÓ no que é específico do capítulo atual — não repita estratégias, exemplos ou personagens fictícios que já caberiam melhor em outro capítulo da lista acima. Se usar um exemplo com nome de pessoa, varie o nome a cada capítulo (não reutilize sempre os mesmos nomes). Mantenha continuidade natural com o contexto anterior, sem repetir o que já foi dito. Não use marcação markdown (sem **, #, _) — escreva em texto puro. Não escreva título do capítulo nem numeração de bloco — apenas o texto corrido. Extensão alvo: cerca de 300 palavras.`;
 }
 
 function buildRefineAndHumanizePrompt({ bookTitle, chapterTitle, niche, targetAudience, tone, draftText }) {
@@ -315,7 +318,7 @@ Preserve 100% do conteúdo, exemplos e ideias do rascunho original — não cort
 // chamada, para render bem mais textos por dia nas cotas grátis).
 // -----------------------------------------------------------------------
 async function generateBlock(params) {
-  const { bookTitle, chapterTitle, blockNumber, niche, targetAudience, tone, recentContext, bookDescription, blocksPerChapter, language } = params;
+  const { bookTitle, chapterTitle, blockNumber, niche, targetAudience, tone, recentContext, bookDescription, blocksPerChapter, language, allChapterTitles } = params;
 
   // ETAPA 1 — "O Arquiteto Denso" (rascunho bruto e denso)
   const architectPrompt = buildArchitectPrompt({
@@ -329,6 +332,7 @@ async function generateBlock(params) {
     bookDescription,
     blocksPerChapter,
     language,
+    allChapterTitles,
   });
   const draftText = await callWithFullResilience(
     ['gemini', 'groq', 'mistral'],

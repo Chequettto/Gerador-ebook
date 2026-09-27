@@ -20,6 +20,12 @@ function sanitize(text) {
     .replace(/[\u2022]/g, '-')
     .replace(/[\u2013\u2014]/g, '-')
     .replace(/[\u2026]/g, '...')
+    // Remove marcação markdown que a IA às vezes escreve (**negrito**, ###
+    // títulos, _itálico_), para não aparecer os símbolos crus no PDF/EPUB.
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/(?<!\w)\*(.+?)\*(?!\w)/g, '$1')
+    .replace(/^#{1,6}\s*/gm, '')
+    .replace(/(?<!\w)_(.+?)_(?!\w)/g, '$1')
     .replace(/[^\x09\x0A\x0D\x20-\x7E\xA0-\xFF]/g, '');
 }
 
@@ -151,6 +157,17 @@ function escapeHtml(text) {
     .replace(/"/g, '&quot;');
 }
 
+// Converte marcação markdown simples (**negrito**, *itálico*, # títulos) em
+// HTML de verdade, já que o EPUB suporta — assim o negrito aparece como
+// negrito de verdade, em vez de asteriscos crus no meio do texto.
+function markdownInlineToHtml(text) {
+  const escaped = escapeHtml(text);
+  return escaped
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/(?<!\w)\*(.+?)\*(?!\w)/g, '<em>$1</em>')
+    .replace(/(?<!\w)_(.+?)_(?!\w)/g, '<em>$1</em>');
+}
+
 function buildEpub(input) {
   const uid = `urn:uuid:${crypto.randomUUID()}`;
   const files = {};
@@ -176,9 +193,9 @@ h1{font-size:1.6em;margin:0 0 .8em}p{margin:0 0 1em;text-align:justify}`
     const name = `OEBPS/chap-${chapter.position}.xhtml`;
     const paragraphs = chapter.content
       .split(/\n+/)
-      .map((p) => p.trim())
+      .map((p) => p.replace(/^#{1,6}\s*/, '').trim())
       .filter(Boolean)
-      .map((p) => `<p>${escapeHtml(p)}</p>`)
+      .map((p) => `<p>${markdownInlineToHtml(p)}</p>`)
       .join('\n');
     files[name] = strToU8(
       `<?xml version="1.0" encoding="UTF-8"?>
