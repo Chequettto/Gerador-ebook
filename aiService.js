@@ -48,9 +48,14 @@ const AI_CLICHES = [
 // -----------------------------------------------------------------------
 // Pools de chaves (18 no total, 6 por provedor)
 // -----------------------------------------------------------------------
+// Quantas chaves cada provedor pode ter, no máximo (ex: GEMINI_KEY_1..40).
+// Gemini e Groq normalmente usam poucas (6), mas o Mistral pode ter muitas
+// mais (ex: 31 contas), então o limite é generoso para os três.
+const MAX_KEYS_PER_PROVIDER = 40;
+
 function buildPool(prefix) {
   const keys = [];
-  for (let i = 1; i <= 6; i += 1) {
+  for (let i = 1; i <= MAX_KEYS_PER_PROVIDER; i += 1) {
     const value = process.env[`${prefix}_${i}`];
     if (value && value.trim().length > 0) {
       keys.push(value.trim());
@@ -163,7 +168,21 @@ async function callGroqOnce(apiKey, prompt) {
   }
 }
 
+// Espaçamento mínimo entre pedidos à MESMA chave do Mistral, para nunca
+// estourar o limite de "pedidos por segundo" documentado (é por conta, então
+// só precisa esperar quando repetir a MESMA chave, não entre chaves diferentes).
+const MISTRAL_MIN_INTERVAL_MS = 1100;
+const lastMistralCallAt = new Map();
+
+async function respectMistralPacing(apiKey) {
+  const last = lastMistralCallAt.get(apiKey) || 0;
+  const wait = MISTRAL_MIN_INTERVAL_MS - (Date.now() - last);
+  if (wait > 0) await sleep(wait);
+  lastMistralCallAt.set(apiKey, Date.now());
+}
+
 async function callMistralOnce(apiKey, prompt) {
+  await respectMistralPacing(apiKey);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
