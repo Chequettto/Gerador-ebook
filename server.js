@@ -6,7 +6,7 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 
-const { generateBlock, generateOutline, pools } = require('./aiService');
+const { generateBlock, generateOutline, generateCoverImageWithGemini, pools } = require('./aiService');
 const { generateCoverUrl } = require('./coverService');
 const { buildPdf, buildEpub } = require('./bookBuildService');
 const { PLANS, findOrCreateCustomer, createLifetimeCharge, createMonthlySubscription, getPaymentStatus } = require('./asaasService');
@@ -47,6 +47,8 @@ app.get('/api/status', (req, res) => {
       gemini: pools.gemini.length,
       groq: pools.groq.length,
       mistral: pools.mistral.length,
+      openrouter: pools.openrouter.length,
+      cloudflare: pools.cloudflare.length,
     },
   });
 });
@@ -172,10 +174,13 @@ app.post('/api/generate-outline', async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // POST /api/generate-cover
-// Gera a URL da capa via Pollinations FLUX (800x1200, sem texto na imagem).
+// Tenta primeiro o Gemini (gemini-3.1-flash-image), que escreve título,
+// subtítulo e autor de verdade na imagem. Se as chaves do Gemini falharem
+// todas, cai para o Pollinations como reserva (esse não escreve texto).
+// Body: { title, subtitle?, author?, niche, stylePreference? }
 // ---------------------------------------------------------------------------
-app.post('/api/generate-cover', (req, res) => {
-  const { title, niche, stylePreference } = req.body || {};
+app.post('/api/generate-cover', async (req, res) => {
+  const { title, subtitle, author, niche, stylePreference } = req.body || {};
 
   if (!title || !niche) {
     return res.status(400).json({
@@ -185,15 +190,34 @@ app.post('/api/generate-cover', (req, res) => {
   }
 
   try {
-    const cover = generateCoverUrl({ title, niche, stylePreference });
-    return res.json({ success: true, ...cover });
-  } catch (error) {
-    console.error('Erro ao gerar capa:', error);
-    return res.status(500).json({
-      success: false,
-      error: 'Falha ao gerar a URL da capa.',
-      details: error.message,
+    const image = await generateCoverImageWithGemini({
+      title,
+      subtitle: subtitle || '',
+      author: author || '',
+      niche,
+      stylePreference,
     });
+    return res.json({
+      success: true,
+      mode: 'gemini',
+      imageBase64: image.bytes.toString('base64'),
+      mimeType: image.mimeType,
+      title,
+      niche,
+    });
+  } catch (geminiError) {
+    console.error('Gemini falhou ao gerar a capa, tentando reserva (Pollinations):', geminiError.message);
+    try {
+      const cover = generateCoverUrl({ title, niche, stylePreference });
+      return res.json({ success: true, mode: 'pollinations', ...cover });
+    } catch (error) {
+      console.error('Erro ao gerar capa (reserva também falhou):', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Falha ao gerar a capa (Gemini e a reserva falharam).',
+        details: `Gemini: ${geminiError.message} | Reserva: ${error.message}`,
+      });
+    }
   }
 });
 
@@ -206,11 +230,12 @@ app.post('/api/generate-cover', (req, res) => {
 // {
 //   "title": "...", "subtitle": "...", "author": "...",
 //   "chapters": [ { "position": 1, "title": "...", "content": "..." }, ... ],
-//   "coverUrl": "https://...">  (opcional — imagem da capa, ex: a do /api/generate-cover)
+//   "coverBase64": "...", "coverMime": "image/png"   (preferido — vem direto do /api/generate-cover no modo Gemini)
+//   "coverUrl": "https://..."                          (alternativa — baixa de uma URL, ex: modo Pollinations)
 // }
 // ---------------------------------------------------------------------------
 app.post('/api/build-book', async (req, res) => {
-  const { title, subtitle, author, chapters, coverUrl } = req.body || {};
+  const { title, subtitle, author, chapters, coverUrl, coverBase64, coverMime: coverMimeIn } = req.body || {};
 
   if (!title || !author || !Array.isArray(chapters) || chapters.length === 0) {
     return res.status(400).json({
@@ -221,7 +246,11 @@ app.post('/api/build-book', async (req, res) => {
   try {
     let coverBytes = null;
     let coverMime = null;
-    if (coverUrl) {
+    if (coverBase64) {
+      // Capa já veio pronta em base64 (modo Gemini) — não precisa baixar nada.
+      coverBytes = new Uint8Array(Buffer.from(coverBase64, 'base64'));
+      coverMime = coverMimeIn || 'image/png';
+    } else if (coverUrl) {
       try {
         const fetch = require('node-fetch');
         const imgRes = await fetch(coverUrl);
@@ -352,6 +381,6 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`✅ Servidor rodando na porta ${PORT}`);
   console.log(
-    `🔑 Chaves configuradas — Gemini: ${pools.gemini.length}/6 | Groq: ${pools.groq.length}/6 | Mistral: ${pools.mistral.length}/6`
+    `🔑 Chaves configuradas — Gemini: ${pools.gemini.length} | Groq: ${pools.groq.length} | Mistral: ${pools.mistral.length} | OpenRouter: ${pools.openrouter.length} | Cloudflare: ${pools.cloudflare.length}`
   );
 });

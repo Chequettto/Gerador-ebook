@@ -352,25 +352,38 @@ async function gerarLivroCompleto() {
     const chapterSteps = chapterTitles.map((t, i) => addStep('ch' + i, t));
     const stepBuild = addStep('build', 'Montando PDF e EPUB');
 
-    // 1) Capa (pula se já tiver sido gerada numa tentativa anterior)
+    // 1) Capa (pula se já tiver sido gerada numa tentativa anterior). Agora
+    // pede título, subtítulo e autor de verdade escritos na imagem (Gemini);
+    // se o Gemini falhar, o servidor já cai sozinho para uma capa sem texto.
     let coverUrl = saved.coverUrl || null;
-    if (coverUrl) {
+    let coverBase64 = saved.coverBase64 || null;
+    let coverMime = saved.coverMime || null;
+    if (coverUrl || coverBase64) {
       setStep('cover', 'reaproveitada (retomando) ✅', 'done');
-      coverPreview.src = coverUrl;
+      coverPreview.src = coverBase64 ? ('data:' + coverMime + ';base64,' + coverBase64) : coverUrl;
       coverPreview.style.display = 'block';
     } else {
       try {
         const res = await fetch(base + '/api/generate-cover', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title: bookTitle, niche, stylePreference: coverStyle })
+          body: JSON.stringify({ title: bookTitle, subtitle, author, niche, stylePreference: coverStyle })
         });
         const data = await res.json();
         if (res.ok && data.success) {
-          coverUrl = data.url;
-          setStep('cover', 'pronta ✅', 'done');
-          coverPreview.src = coverUrl;
+          if (data.mode === 'gemini') {
+            coverBase64 = data.imageBase64;
+            coverMime = data.mimeType || 'image/png';
+            coverPreview.src = 'data:' + coverMime + ';base64,' + coverBase64;
+            setStep('cover', 'pronta, com texto de verdade (Gemini) ✅', 'done');
+          } else {
+            coverUrl = data.url;
+            coverPreview.src = coverUrl;
+            setStep('cover', 'pronta, sem texto (reserva) ✅', 'done');
+          }
           coverPreview.style.display = 'block';
           saved.coverUrl = coverUrl;
+          saved.coverBase64 = coverBase64;
+          saved.coverMime = coverMime;
           saveProgress(saved);
         } else {
           setStep('cover', 'falhou, seguindo sem capa', 'err');
@@ -409,7 +422,7 @@ async function gerarLivroCompleto() {
     setStep('build', 'montando...');
     const buildRes = await fetch(base + '/api/build-book', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: bookTitle, subtitle, author, chapters, coverUrl })
+      body: JSON.stringify({ title: bookTitle, subtitle, author, chapters, coverUrl, coverBase64, coverMime })
     });
     const buildData = await buildRes.json();
     if (!buildRes.ok || !buildData.success) throw new Error(buildData.details || buildData.error || 'Falha ao montar o livro.');

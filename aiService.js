@@ -10,11 +10,11 @@
  *   ETAPA 1 -> "O Arquiteto Denso"                    (preferência: Gemini, depois Groq, depois Mistral)
  *   ETAPA 2 -> "Refino de Cadência + Humanização"      (preferência: Groq, depois Mistral, depois Gemini)
  *
- * As 18 chaves (6 Gemini + 6 Groq + 6 Mistral, de 18 contas diferentes) são
+ * As chaves configuradas (Gemini + Groq + Mistral, de contas diferentes) são
  * UM ÚNICO ANEL de resiliência: se as 6 chaves do provedor preferido de uma
  * etapa falharem (cota esgotada, 429, 500, timeout), o sistema passa a usar
  * as chaves dos outros dois provedores para realizar aquele mesmo trabalho.
- * Só se as 18 chaves falharem na mesma rodada é que o serviço faz uma PAUSA
+ * Só se todas as chaves configuradas falharem na mesma rodada é que o serviço faz uma PAUSA
  * TÉCNICA de 10s e tenta tudo de novo, por até 3 rodadas — depois disso,
  * desiste do bloco de forma controlada (avisando "tente mais tarde") em vez
  * de travar para sempre.
@@ -24,8 +24,8 @@
 const fetch = require('node-fetch');
 
 const REQUEST_TIMEOUT_MS = 15_000; // timeout individual por chamada (AbortController)
-const TECHNICAL_PAUSE_MS = 10_000; // pausa técnica quando as 18 chaves falham numa rodada
-const MAX_GLOBAL_ROUNDS = 3; // rodadas completas pelas 18 chaves antes de desistir deste bloco
+const TECHNICAL_PAUSE_MS = 10_000; // pausa técnica quando todas as chaves falham numa rodada
+const MAX_GLOBAL_ROUNDS = 3; // rodadas completas por todas as chaves antes de desistir deste bloco
 
 // -----------------------------------------------------------------------
 // Clichês de IA a eliminar na Etapa 3 (usados no prompt do Humanizador)
@@ -68,10 +68,15 @@ const pools = {
   gemini: buildPool('GEMINI_KEY'),
   groq: buildPool('GROQ_KEY'),
   mistral: buildPool('MISTRAL_KEY'),
+  // Reservas extras (opcionais, sem cartão). Só entram em ação se as chaves
+  // existirem no Render; caso contrário são simplesmente ignoradas.
+  openrouter: buildPool('OPENROUTER_KEY'),
+  // Cloudflare precisa do Account ID além do token (CLOUDFLARE_KEY_1..N).
+  cloudflare: process.env.CLOUDFLARE_ACCOUNT_ID ? buildPool('CLOUDFLARE_KEY') : [],
 };
 
 // Cursor de rotação independente por provedor, para distribuir carga entre chamadas
-const rotationCursor = { gemini: 0, groq: 0, mistral: 0 };
+const rotationCursor = { gemini: 0, groq: 0, mistral: 0, openrouter: 0, cloudflare: 0 };
 
 function nextStartIndex(provider) {
   const pool = pools[provider];
@@ -219,7 +224,179 @@ async function callMistralOnce(apiKey, prompt) {
   }
 }
 
+// -----------------------------------------------------------------------
+// OpenRouter (reserva gratuita, formato compatível com OpenAI).
+// Limite grátis documentado: ~20 pedidos/minuto e 50/dia por conta, então
+// espaçamos os pedidos da mesma chave. A lista de modelos grátis muda com
+// frequência: se o modelo abaixo sumir, troque OPENROUTER_MODEL no Render.
+// -----------------------------------------------------------------------
+const OPENROUTER_MIN_INTERVAL_MS = 3100;
+const lastOpenRouterCallAt = new Map();
+
+async function callOpenRouterOnce(apiKey, prompt) {
+  const last = lastOpenRouterCallAt.get(apiKey) || 0;
+  const wait = OPENROUTER_MIN_INTERVAL_MS - (Date.now() - last);
+  if (wait > 0) await sleep(wait);
+  lastOpenRouterCallAt.set(apiKey, Date.now());
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct:free',
+        temperature: 0.8,
+        max_tokens: 2048,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text().catch(() => '');
+      const err = new Error(`OpenRouter HTTP ${response.status}: ${errText.slice(0, 300)}`);
+      err.status = response.status;
+      throw err;
+    }
+
+    const data = await response.json();
+    const text = data?.choices?.[0]?.message?.content;
+    if (!text || !text.trim()) {
+      throw new Error('OpenRouter retornou resposta vazia.');
+    }
+    return text.trim();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// -----------------------------------------------------------------------
+// Cloudflare Workers AI (reserva gratuita: 10.000 "neurons" por dia).
+// Precisa de CLOUDFLARE_ACCOUNT_ID (não secreto) + token em CLOUDFLARE_KEY_1.
+// -----------------------------------------------------------------------
+async function callCloudflareOnce(apiToken, prompt) {
+  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+  if (!accountId) throw new Error('CLOUDFLARE_ACCOUNT_ID não configurado.');
+  const model = process.env.CLOUDFLARE_MODEL || '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiToken}`,
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 2048,
+        temperature: 0.8,
+      }),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text().catch(() => '');
+      const err = new Error(`Cloudflare HTTP ${response.status}: ${errText.slice(0, 300)}`);
+      err.status = response.status;
+      throw err;
+    }
+
+    const data = await response.json();
+    const text = data?.result?.response;
+    if (typeof text !== 'string' || !text.trim()) {
+      throw new Error('Cloudflare retornou resposta vazia ou em formato inesperado.');
+    }
+    return text.trim();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// -----------------------------------------------------------------------
+// Capa com texto de verdade (título, subtítulo, autor) via Gemini
+// (gemini-3.1-flash-image, tem boa renderização de texto em imagens).
+// Gira pelas chaves do Gemini; se todas falharem, quem chamou decide se
+// cai para a capa sem texto (Pollinations) como reserva.
+// -----------------------------------------------------------------------
+async function generateCoverImageWithGemini({ title, subtitle, author, niche, stylePreference }) {
+  const pool = pools.gemini;
+  if (!pool || pool.length === 0) {
+    throw new Error('Nenhuma chave do Gemini configurada para gerar a capa.');
+  }
+
+  const prompt = `Crie uma capa de e-book profissional e vendável, no estilo editorial de best-seller, para o nicho "${niche}"${
+    stylePreference ? `, com este estilo visual: ${stylePreference}` : ''
+  }.
+
+A capa DEVE conter o seguinte texto, escrito de forma legível, bem posicionado e esteticamente integrada ao design (como uma capa de livro de verdade, não texto colado por cima):
+- Título, em destaque, grande: "${title}"
+${subtitle ? `- Subtítulo, menor, abaixo do título: "${subtitle}"` : ''}
+- Nome do autor, na parte inferior da capa: "${author}"
+
+Proporção de e-book (retrato, 2:3). Composição profissional, tipografia elegante e legível, nada de texto torto ou com erros de ortografia. Alta qualidade, pronta para publicação.`;
+
+  let lastError = null;
+  const startIndex = nextStartIndex('gemini');
+  for (let offset = 0; offset < pool.length; offset += 1) {
+    const keyIndex = (startIndex + offset) % pool.length;
+    const apiKey = pool[keyIndex];
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      log('CAPA - Gemini (com texto)', `Tentando chave #${keyIndex + 1}/${pool.length}`);
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image:generateContent?key=${apiKey}`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        }),
+      });
+
+      if (!response.ok) {
+        const errText = await response.text().catch(() => '');
+        throw new Error(`Gemini Image HTTP ${response.status}: ${errText.slice(0, 300)}`);
+      }
+
+      const data = await response.json();
+      const parts = data?.candidates?.[0]?.content?.parts || [];
+      const imagePart = parts.find((p) => p.inlineData && p.inlineData.data);
+      if (!imagePart) {
+        throw new Error('O Gemini não retornou nenhuma imagem.');
+      }
+
+      log('CAPA - Gemini (com texto)', `Sucesso com a chave #${keyIndex + 1}.`);
+      return {
+        bytes: Buffer.from(imagePart.inlineData.data, 'base64'),
+        mimeType: imagePart.inlineData.mimeType || 'image/png',
+      };
+    } catch (error) {
+      lastError = error;
+      log('CAPA - Gemini (com texto)', `Falha na chave #${keyIndex + 1}: ${error.message}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  throw new Error(
+    `Todas as chaves do Gemini falharam ao gerar a capa com texto. Último erro: ${
+      lastError ? lastError.message : 'desconhecido'
+    }`
+  );
+}
+
 const CALLERS = {
+  openrouter: callOpenRouterOnce,
+  cloudflare: callCloudflareOnce,
   gemini: callGeminiOnce,
   groq: callGroqOnce,
   mistral: callMistralOnce,
@@ -227,23 +404,23 @@ const CALLERS = {
 
 // -----------------------------------------------------------------------
 // Motor de resiliência TOTAL: para cada etapa, tenta primeiro o provedor
-// preferido (percorrendo suas 6 chaves) e, se todas falharem, passa para o
-// PRÓXIMO PROVEDOR (as outras 6 chaves), e depois o terceiro — usando as
-// 18 chaves como um único anel, não 3 anéis isolados. Só se as 18 chaves
-// falharem na mesma rodada é que o sistema faz uma pausa técnica de 10s e
-// tenta tudo de novo. Depois de MAX_GLOBAL_ROUNDS rodadas sem sucesso,
-// desiste deste bloco de forma controlada (nunca trava para sempre).
+// preferido (percorrendo todas as suas chaves) e, se todas falharem, passa
+// para o PRÓXIMO PROVEDOR, e depois o terceiro — usando todas as chaves
+// configuradas como um único anel, não anéis isolados. Só se todas falharem
+// na mesma rodada é que o sistema faz uma pausa técnica de 10s e tenta tudo
+// de novo. Depois de MAX_GLOBAL_ROUNDS rodadas sem sucesso, desiste deste
+// bloco de forma controlada (nunca trava para sempre).
 // -----------------------------------------------------------------------
 async function callWithFullResilience(providerOrder, prompt, roleLabel) {
   let lastError = null;
   const firstErrorPerProvider = {};
+  const totalKeys = providerOrder.reduce((sum, p) => sum + ((pools[p] && pools[p].length) || 0), 0);
 
   for (let round = 1; round <= MAX_GLOBAL_ROUNDS; round += 1) {
     for (const provider of providerOrder) {
       const pool = pools[provider];
       const caller = CALLERS[provider];
       if (!pool || pool.length === 0) {
-        if (!firstErrorPerProvider[provider]) firstErrorPerProvider[provider] = 'nenhuma chave configurada';
         continue; // provedor sem chaves configuradas, pula
       }
 
@@ -267,25 +444,29 @@ async function callWithFullResilience(providerOrder, prompt, roleLabel) {
 
     if (round >= MAX_GLOBAL_ROUNDS) break;
 
-    // As 18 chaves falharam nesta rodada.
+    // As chaves configuradas falharam nesta rodada.
     log(
       roleLabel,
-      `As 18 chaves falharam na rodada ${round} (último erro: ${
+      `As ${totalKeys} chaves falharam na rodada ${round} (último erro: ${
         lastError ? lastError.message : 'desconhecido'
       }). Pausa técnica de ${TECHNICAL_PAUSE_MS / 1000}s antes de tentar novamente.`
     );
     await sleep(TECHNICAL_PAUSE_MS);
   }
 
-  // Esgotou as rodadas com as 18 chaves: desiste deste bloco de forma controlada,
-  // mostrando o erro real de CADA provedor (não só o último), para dar
-  // diagnóstico de verdade em vez de uma mensagem genérica de "sem cota".
+  // Esgotou as rodadas com as chaves configuradas: desiste deste bloco de
+  // forma controlada, mostrando o erro real de CADA provedor (não só o
+  // último), para dar diagnóstico de verdade em vez de mensagem genérica.
+  if (totalKeys === 0) {
+    throw new Error('Nenhuma chave de IA configurada. Cadastre as chaves em Environment no Render (GEMINI_KEY_1, GROQ_KEY_1, MISTRAL_KEY_1...).');
+  }
+
   const providerDetails = Object.entries(firstErrorPerProvider)
     .map(([provider, msg]) => `${provider.toUpperCase()}: ${msg}`)
     .join(' | ');
 
   const finalError = new Error(
-    `As 18 chaves falharam na etapa "${roleLabel}". Detalhe por provedor -> ${providerDetails || 'sem detalhes'}`
+    `As ${totalKeys} chaves configuradas falharam na etapa "${roleLabel}". Detalhe por provedor -> ${providerDetails || 'sem detalhes'}`
   );
   finalError.retryable = true;
   throw finalError;
@@ -354,7 +535,7 @@ async function generateBlock(params) {
     allChapterTitles,
   });
   const draftText = await callWithFullResilience(
-    ['gemini', 'groq', 'mistral'],
+    ['gemini', 'groq', 'mistral', 'openrouter', 'cloudflare'],
     architectPrompt,
     'ETAPA 1 - Arquiteto Denso'
   );
@@ -369,7 +550,7 @@ async function generateBlock(params) {
     draftText,
   });
   const finalText = await callWithFullResilience(
-    ['groq', 'mistral', 'gemini'],
+    ['groq', 'mistral', 'gemini', 'openrouter', 'cloudflare'],
     refineAndHumanizePrompt,
     'ETAPA 2 - Refino + Humanização'
   );
@@ -398,7 +579,7 @@ TAREFA: Responda APENAS com um JSON válido (sem markdown, sem \`\`\`, sem texto
 
 A lista "chapters" deve ter EXATAMENTE ${numChapters} títulos, em ordem lógica de progressão (do básico ao avançado, ou de um problema até a solução completa), específicos para o nicho "${niche}" — nunca genéricos como "Capítulo 1", "Introdução" sozinha, etc.`;
 
-  const raw = await callWithFullResilience(['gemini', 'groq', 'mistral'], prompt, 'ESBOÇO - Sumário Automático');
+  const raw = await callWithFullResilience(['gemini', 'groq', 'mistral', 'openrouter', 'cloudflare'], prompt, 'ESBOÇO - Sumário Automático');
 
   const cleaned = raw
     .trim()
@@ -447,6 +628,7 @@ A lista "chapters" deve ter EXATAMENTE ${numChapters} títulos, em ordem lógica
 module.exports = {
   generateBlock,
   generateOutline,
+  generateCoverImageWithGemini,
   callWithFullResilience,
   pools,
 };
