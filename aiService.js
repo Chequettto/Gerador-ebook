@@ -403,48 +403,67 @@ const CALLERS = {
 };
 
 // -----------------------------------------------------------------------
-// Motor de resiliência TOTAL: para cada etapa, tenta primeiro o provedor
-// preferido (percorrendo todas as suas chaves) e, se todas falharem, passa
-// para o PRÓXIMO PROVEDOR, e depois o terceiro — usando todas as chaves
-// configuradas como um único anel, não anéis isolados. Só se todas falharem
-// na mesma rodada é que o sistema faz uma pausa técnica de 10s e tenta tudo
-// de novo. Depois de MAX_GLOBAL_ROUNDS rodadas sem sucesso, desiste deste
-// bloco de forma controlada (nunca trava para sempre).
+// Motor de resiliência TOTAL: intercala 1 chave de cada provedor por vez
+// (Gemini, depois Groq, depois Mistral, depois OpenRouter, depois
+// Cloudflare, e volta pro Gemini de novo) em vez de esgotar um provedor
+// inteiro antes de tentar o próximo. Assim, se uma IA estiver com
+// problema, o sistema já tenta outra rapidinho. Só se todas as chaves
+// falharem na mesma rodada é que o sistema faz uma pausa técnica de 10s e
+// tenta tudo de novo. Depois de MAX_GLOBAL_ROUNDS rodadas sem sucesso,
+// desiste deste bloco de forma controlada (nunca trava para sempre).
 // -----------------------------------------------------------------------
+// Monta uma fila intercalada: 1 chave de cada provedor por vez, dando a
+// volta — em vez de esgotar todas as chaves de um provedor antes de tentar
+// o próximo. Assim, se uma IA estiver com problema, o sistema já tenta
+// outra rapidinho, sem "insistir" nas 6+ chaves da mesma primeiro.
+function buildInterleavedQueue(providerOrder) {
+  const providerPools = providerOrder
+    .map((provider) => {
+      const pool = pools[provider];
+      if (!pool || pool.length === 0) return null;
+      const startIndex = nextStartIndex(provider);
+      return { provider, pool, startIndex };
+    })
+    .filter(Boolean);
+
+  const maxLen = providerPools.reduce((max, p) => Math.max(max, p.pool.length), 0);
+  const queue = [];
+  for (let offset = 0; offset < maxLen; offset += 1) {
+    for (const { provider, pool, startIndex } of providerPools) {
+      if (offset < pool.length) {
+        const keyIndex = (startIndex + offset) % pool.length;
+        queue.push({ provider, keyIndex, poolSize: pool.length, apiKey: pool[keyIndex] });
+      }
+    }
+  }
+  return queue;
+}
+
 async function callWithFullResilience(providerOrder, prompt, roleLabel) {
   let lastError = null;
   const firstErrorPerProvider = {};
   const totalKeys = providerOrder.reduce((sum, p) => sum + ((pools[p] && pools[p].length) || 0), 0);
 
   for (let round = 1; round <= MAX_GLOBAL_ROUNDS; round += 1) {
-    for (const provider of providerOrder) {
-      const pool = pools[provider];
-      const caller = CALLERS[provider];
-      if (!pool || pool.length === 0) {
-        continue; // provedor sem chaves configuradas, pula
-      }
+    const queue = buildInterleavedQueue(providerOrder);
 
-      const startIndex = nextStartIndex(provider);
-      for (let offset = 0; offset < pool.length; offset += 1) {
-        const keyIndex = (startIndex + offset) % pool.length;
-        const apiKey = pool[keyIndex];
-        try {
-          log(roleLabel, `Tentando ${provider} chave #${keyIndex + 1}/${pool.length} (rodada ${round}/${MAX_GLOBAL_ROUNDS})`);
-          const result = await caller(apiKey, prompt);
-          log(roleLabel, `Sucesso com ${provider} chave #${keyIndex + 1} na rodada ${round}.`);
-          return result;
-        } catch (error) {
-          lastError = error;
-          if (!firstErrorPerProvider[provider]) firstErrorPerProvider[provider] = error.message;
-          log(roleLabel, `Falha em ${provider} chave #${keyIndex + 1}: ${error.message}.`);
-        }
+    for (const { provider, keyIndex, poolSize, apiKey } of queue) {
+      const caller = CALLERS[provider];
+      try {
+        log(roleLabel, `Tentando ${provider} chave #${keyIndex + 1}/${poolSize} (rodada ${round}/${MAX_GLOBAL_ROUNDS})`);
+        const result = await caller(apiKey, prompt);
+        log(roleLabel, `Sucesso com ${provider} chave #${keyIndex + 1} na rodada ${round}.`);
+        return result;
+      } catch (error) {
+        lastError = error;
+        if (!firstErrorPerProvider[provider]) firstErrorPerProvider[provider] = error.message;
+        log(roleLabel, `Falha em ${provider} chave #${keyIndex + 1}: ${error.message}. Intercalando para o próximo provedor.`);
       }
-      log(roleLabel, `Todas as chaves de ${provider} falharam. Passando para o próximo provedor disponível.`);
     }
 
     if (round >= MAX_GLOBAL_ROUNDS) break;
 
-    // As chaves configuradas falharam nesta rodada.
+    // Todas as chaves configuradas falharam nesta rodada.
     log(
       roleLabel,
       `As ${totalKeys} chaves falharam na rodada ${round} (último erro: ${
@@ -476,7 +495,7 @@ async function callWithFullResilience(providerOrder, prompt, roleLabel) {
 // Construtores de prompt dinâmicos por etapa, adaptados a niche/tone/audience
 // -----------------------------------------------------------------------
 
-function buildArchitectPrompt({ bookTitle, chapterTitle, blockNumber, niche, targetAudience, tone, recentContext, bookDescription, blocksPerChapter, language, allChapterTitles }) {
+function buildArchitectPrompt({ bookTitle, chapterTitle, blockNumber, niche, targetAudience, tone, recentContext, bookDescription, blocksPerChapter, language, allChapterTitles, researchContext }) {
   const lang = language || 'português do Brasil';
   const otherChapters = Array.isArray(allChapterTitles)
     ? allChapterTitles.filter((t) => t !== chapterTitle)
@@ -488,6 +507,7 @@ BLOCO: ${blockNumber} de ${blocksPerChapter || 6} (aproximadamente 300 palavras 
 PÚBLICO-ALVO: ${targetAudience}
 TOM DESEJADO: ${tone}
 ${otherChapters.length > 0 ? `\nOUTROS CAPÍTULOS DO MESMO LIVRO (não repita o conteúdo específico deles aqui — cada capítulo deve trazer algo NOVO):\n${otherChapters.map((t) => `- ${t}`).join('\n')}\n` : ''}
+${researchContext ? `\n${researchContext}\nUse esses dados como apoio factual quando fizer sentido, mas escreva sempre com suas próprias palavras — nunca copie frases das fontes.\n` : ''}
 CONTEXTO RECENTE (o que já foi escrito nos blocos anteriores deste capítulo, para dar continuidade sem repetir):
 """
 ${recentContext || '(Este é o primeiro bloco do capítulo — não há contexto anterior.)'}
@@ -518,7 +538,7 @@ Preserve 100% do conteúdo, exemplos e ideias do rascunho original — não cort
 // chamada, para render bem mais textos por dia nas cotas grátis).
 // -----------------------------------------------------------------------
 async function generateBlock(params) {
-  const { bookTitle, chapterTitle, blockNumber, niche, targetAudience, tone, recentContext, bookDescription, blocksPerChapter, language, allChapterTitles } = params;
+  const { bookTitle, chapterTitle, blockNumber, niche, targetAudience, tone, recentContext, bookDescription, blocksPerChapter, language, allChapterTitles, researchContext } = params;
 
   // ETAPA 1 — "O Arquiteto Denso" (rascunho bruto e denso)
   const architectPrompt = buildArchitectPrompt({
@@ -533,6 +553,7 @@ async function generateBlock(params) {
     blocksPerChapter,
     language,
     allChapterTitles,
+    researchContext,
   });
   const draftText = await callWithFullResilience(
     ['gemini', 'groq', 'mistral', 'openrouter', 'cloudflare'],

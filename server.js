@@ -10,6 +10,7 @@ const { generateBlock, generateOutline, generateCoverImageWithGemini, pools } = 
 const { generateCoverUrl } = require('./coverService');
 const { buildPdf, buildEpub } = require('./bookBuildService');
 const { PLANS, findOrCreateCustomer, createLifetimeCharge, createMonthlySubscription, getPaymentStatus } = require('./asaasService');
+const researchEngine = require('./research/researchEngine');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -58,6 +59,20 @@ app.get('/api/health', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/research-status
+// Painel simples do Research Engine: quantas fontes conectadas, quantas
+// pesquisas estão guardadas em cache. Cada pesquisa individual já devolve
+// suas próprias estatísticas dentro de /api/generate-block (researchStats).
+// ---------------------------------------------------------------------------
+app.get('/api/research-status', (req, res) => {
+  res.json({
+    connectorsAvailable: researchEngine.connectors.map((c) => c.name),
+    europeanaConfigured: Boolean(process.env.EUROPEANA_API_KEY),
+    cache: researchEngine.cacheStats(),
+  });
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/generate-block
 // Gera 1 bloco (~350-400 palavras) de um capítulo, passando pela esteira
 // tripla sequencial (Gemini -> Groq -> Mistral). Dividido em blocos pequenos
@@ -90,6 +105,21 @@ app.post('/api/generate-block', async (req, res) => {
   }
 
   try {
+    // Research Engine: pesquisa fatos em fontes públicas ANTES de chamar a
+    // IA (só na prática, na primeira vez por capítulo — depois vem do
+    // cache). Se a pesquisa falhar por qualquer motivo, a geração continua
+    // normalmente sem esse contexto extra — nunca trava o e-book por causa
+    // disso, como pedido.
+    let researchContext = '';
+    let researchStats = null;
+    try {
+      const researchResult = await researchEngine.research({ topic: niche, chapterTitle });
+      researchContext = researchResult.context;
+      researchStats = researchResult.stats;
+    } catch (researchError) {
+      console.error('Research Engine falhou, seguindo sem contexto extra:', researchError.message);
+    }
+
     const result = await generateBlock({
       bookTitle,
       chapterTitle,
@@ -102,12 +132,14 @@ app.post('/api/generate-block', async (req, res) => {
       blocksPerChapter: maxBlocks,
       language: language || 'português do Brasil',
       allChapterTitles: Array.isArray(allChapterTitles) ? allChapterTitles : [],
+      researchContext,
     });
 
     return res.json({
       success: true,
       bookTitle,
       chapterTitle,
+      researchStats,
       blockNumber: blockNum,
       ...result,
     });
