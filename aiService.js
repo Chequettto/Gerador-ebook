@@ -250,7 +250,7 @@ async function callOpenRouterOnce(apiKey, prompt) {
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct:free',
+        model: process.env.OPENROUTER_MODEL || 'openrouter/free',
         temperature: 0.8,
         max_tokens: 2048,
         messages: [{ role: 'user', content: prompt }],
