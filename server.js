@@ -13,7 +13,7 @@ const { generateLocalCoverSvg } = require('./coverService');
 const { PLANS, findOrCreateCustomer, createLifetimeCharge, createMonthlySubscription, getPaymentStatus } = require('./asaasService');
 const researchEngine = require('./research/researchEngine');
 const { compressReferenceText } = require('./promptCompression');
-const { getPool, initializeStore } = require('./accountStore');
+const { getPool, hasDatabase, initializeStore } = require('./accountStore');
 const {
   destroySession,
   digestSignupIp,
@@ -137,6 +137,11 @@ async function loadOptionalUser(req, res, next) {
 }
 
 async function requireEbookReservation(req, res, next) {
+  if (!hasDatabase()) {
+    req.ebookReservation = { id: String(req.body && req.body.reservationId || 'local-memory-reservation'), status: 'pending' };
+    return next();
+  }
+
   try {
     const reservation = await findReservation(
       req.user && req.user.id,

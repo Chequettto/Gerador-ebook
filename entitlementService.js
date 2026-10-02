@@ -1,9 +1,53 @@
 'use strict';
 
 const crypto = require('crypto');
-const { getPool } = require('./accountStore');
+const { getMemoryStore, getPool, hasDatabase } = require('./accountStore');
+
+function readMemoryReservations() {
+  return Array.from(getMemoryStore().reservations.values());
+}
+
+function memoryReservationFor(user, ipHash) {
+  const list = readMemoryReservations().filter((reservation) => {
+    if (user && reservation.user_id === user.id) return true;
+    if (!user && reservation.ip_hash === ipHash && reservation.is_free) return true;
+    return false;
+  });
+  return list.filter((reservation) => reservation.status === 'pending').sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0] || null;
+}
 
 async function reserveEbook(user, ipHash) {
+  if (!hasDatabase()) {
+    if (!user) {
+      if (!ipHash) throw Object.assign(new Error('Não foi possível identificar seu endereço de conexão.'), { status: 400 });
+      const existing = readMemoryReservations().find((reservation) => reservation.ip_hash === ipHash && reservation.is_free && reservation.status === 'pending');
+      if (existing) return { reservationId: existing.id, isFree: true, resumed: true };
+      const reservation = {
+        id: crypto.randomUUID(),
+        user_id: null,
+        ip_hash: ipHash,
+        is_free: true,
+        status: 'pending',
+        created_at: new Date().toISOString(),
+      };
+      getMemoryStore().reservations.set(reservation.id, reservation);
+      return { reservationId: reservation.id, isFree: true, resumed: false };
+    }
+
+    const pending = memoryReservationFor(user, null);
+    if (pending) return { reservationId: pending.id, isFree: pending.is_free, resumed: true };
+    const reservation = {
+      id: crypto.randomUUID(),
+      user_id: user.id,
+      ip_hash: null,
+      is_free: !user.is_admin && !user.has_lifetime_access && !user.paid_until,
+      status: 'pending',
+      created_at: new Date().toISOString(),
+    };
+    getMemoryStore().reservations.set(reservation.id, reservation);
+    return { reservationId: reservation.id, isFree: reservation.is_free, resumed: false };
+  }
+
   const db = getPool();
   const client = await db.connect();
   try {
@@ -81,6 +125,15 @@ async function reserveEbook(user, ipHash) {
 }
 
 async function findReservation(userId, reservationId, ipHash) {
+  if (!hasDatabase()) {
+    if (!reservationId) return null;
+    const reservation = getMemoryStore().reservations.get(reservationId);
+    if (!reservation) return null;
+    if (userId && reservation.user_id !== userId) return null;
+    if (!userId && reservation.ip_hash && reservation.ip_hash !== ipHash) return null;
+    return { id: reservation.id, is_free: reservation.is_free, status: reservation.status };
+  }
+
   if (!reservationId) return null;
   const result = await getPool().query(
     `SELECT id, is_free, status FROM ebook_reservations
@@ -94,6 +147,16 @@ async function findReservation(userId, reservationId, ipHash) {
 }
 
 async function completeReservation(userId, reservationId, ipHash) {
+  if (!hasDatabase()) {
+    const reservation = getMemoryStore().reservations.get(reservationId);
+    if (!reservation || reservation.status !== 'pending') return false;
+    if (userId && reservation.user_id !== userId) return false;
+    if (!userId && reservation.ip_hash && reservation.ip_hash !== ipHash) return false;
+    reservation.status = 'completed';
+    reservation.completed_at = new Date().toISOString();
+    return true;
+  }
+
   const result = await getPool().query(
     `UPDATE ebook_reservations SET status = 'completed', completed_at = NOW()
       WHERE id = $1 AND status = 'pending' AND (

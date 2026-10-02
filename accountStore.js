@@ -2,6 +2,13 @@
 
 const { Pool } = require('pg');
 
+const memoryStore = {
+  users: new Map(),
+  emailCodes: new Map(),
+  sessions: new Map(),
+  reservations: new Map(),
+};
+
 const pool = process.env.DATABASE_URL
   ? new Pool({
       connectionString: process.env.DATABASE_URL,
@@ -9,12 +16,24 @@ const pool = process.env.DATABASE_URL
     })
   : null;
 
+function hasDatabase() {
+  return Boolean(pool);
+}
+
+function getMemoryStore() {
+  return memoryStore;
+}
+
 function getPool() {
   if (!pool) throw new Error('DATABASE_URL não configurada.');
   return pool;
 }
 
 async function initializeStore() {
+  if (!pool) {
+    console.warn('[store] DATABASE_URL não configurada; usando fallback em memória para geração local.');
+    return;
+  }
   const db = getPool();
   await db.query(`
     CREATE TABLE IF NOT EXISTS users (
@@ -74,4 +93,4 @@ async function initializeStore() {
   `);
 }
 
-module.exports = { getPool, initializeStore };
+module.exports = { getPool, getMemoryStore, hasDatabase, initializeStore };
