@@ -4,6 +4,14 @@ Backend Node.js/Express para geração automatizada de e-books via esteira tripl
 
 ## Rotas
 
+### E-book grátis e login por e-mail
+
+O visitante pode gerar um e-book grátis sem informar e-mail. A cota é persistida por endereço IP no PostgreSQL e é compartilhada por pessoas que usam a mesma rede. Depois do primeiro e-book, a página mostra os planos; para pagar e continuar, a pessoa entra com um código temporário enviado por e-mail.
+
+Configure `DATABASE_URL` e `AUTH_SESSION_SECRET` para habilitar sessões e cotas. O PostgreSQL é necessário mesmo para a cortesia anônima. `SMTP_HOST`, `SMTP_USER`, `SMTP_PASS` e `SMTP_FROM` habilitam os códigos por e-mail. `ADMIN_EMAIL` recebe acesso administrativo após confirmar o código; o administrador pode gerar sem limite.
+
+As rotas de geração e montagem exigem uma reserva gratuita ou uma reserva da conta/plano, vinculada ao usuário ou ao IP. Checkout e painel administrativo exigem sessão autenticada. Contas novas adicionais do mesmo IP são recusadas; uma pessoa que já tem conta pode entrar de outra rede.
+
 ### `POST /api/generate-block`
 Gera 1 bloco (~350–400 palavras) de um capítulo, passando pela esteira tripla.
 
@@ -21,7 +29,7 @@ Body JSON:
 ```
 
 ### `POST /api/generate-cover`
-Gera a URL de uma capa 800x1200 via Pollinations FLUX, sem texto na imagem.
+Gera uma capa com título, subtítulo e autor usando exclusivamente o modelo de imagem Gemini. Configure ao menos uma variável `GEMINI_KEY_1..GEMINI_KEY_40`.
 
 Body JSON:
 ```json
@@ -38,8 +46,10 @@ Body JSON:
 2. No Render, crie um **Web Service** apontando para o repositório.
 3. Build Command: `npm install`
 4. Start Command: `npm start`
-5. Em **Environment**, adicione as 18 chaves (`GEMINI_KEY_1..6`, `GROQ_KEY_1..6`, `MISTRAL_KEY_1..6`) — veja `.env.example`.
+5. Em **Environment**, configure PostgreSQL, SMTP, Asaas e as chaves de IA necessárias — veja `.env.example`.
 6. O Render injeta `PORT` automaticamente; o servidor já usa `process.env.PORT`.
+
+Configure `ASAAS_WEBHOOK_TOKEN` e cadastre `https://SEU-DOMINIO/api/asaas-webhook` no painel Asaas. Use `ASAAS_BASE_URL=https://api-sandbox.asaas.com/v3` para validar cobranças no sandbox antes de produção.
 
 ## Arquitetura de resiliência
 

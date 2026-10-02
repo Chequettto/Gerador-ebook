@@ -65,13 +65,13 @@ function dueDate(daysAhead) {
   return date.toISOString().slice(0, 10);
 }
 
-async function createLifetimeCharge({ customerId, description, externalReference }) {
+async function createLifetimeCharge({ customerId, description, externalReference, value = PLANS.lifetime.price }) {
   const payment = await asaasFetch('/payments', {
     method: 'POST',
     body: JSON.stringify({
       customer: customerId,
       billingType: 'UNDEFINED', // deixa o cliente escolher PIX, boleto ou cartão
-      value: PLANS.lifetime.price,
+      value,
       dueDate: dueDate(3),
       description,
       externalReference,
@@ -80,13 +80,13 @@ async function createLifetimeCharge({ customerId, description, externalReference
   return { paymentId: payment.id, subscriptionId: null, url: payment.invoiceUrl };
 }
 
-async function createMonthlySubscription({ customerId, description, externalReference }) {
+async function createMonthlySubscription({ customerId, description, externalReference, value = PLANS.monthly.price }) {
   const subscription = await asaasFetch('/subscriptions', {
     method: 'POST',
     body: JSON.stringify({
       customer: customerId,
       billingType: 'UNDEFINED',
-      value: PLANS.monthly.price,
+      value,
       nextDueDate: dueDate(0),
       cycle: 'MONTHLY',
       description,

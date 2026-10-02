@@ -323,8 +323,7 @@ async function callCloudflareOnce(apiToken, prompt) {
 // -----------------------------------------------------------------------
 // Capa com texto de verdade (título, subtítulo, autor) via Gemini
 // (gemini-3.1-flash-image, tem boa renderização de texto em imagens).
-// Gira pelas chaves do Gemini; se todas falharem, quem chamou decide se
-// cai para a capa sem texto (Pollinations) como reserva.
+// Gira pelas chaves do Gemini; não há provedor alternativo para capas.
 // -----------------------------------------------------------------------
 async function generateCoverImageWithGemini({ title, subtitle, author, niche, stylePreference }) {
   const pool = pools.gemini;

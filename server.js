@@ -5,15 +5,27 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const crypto = require('crypto');
 
 const { generateBlock, generateOutline, generateCoverImageWithGemini, pools } = require('./aiService');
-const { generateCoverUrl } = require('./coverService');
 const { buildPdf, buildEpub } = require('./bookBuildService');
 const { PLANS, findOrCreateCustomer, createLifetimeCharge, createMonthlySubscription, getPaymentStatus } = require('./asaasService');
 const researchEngine = require('./research/researchEngine');
+const { getPool, initializeStore } = require('./accountStore');
+const {
+  destroySession,
+  digestSignupIp,
+  expiredSessionCookie,
+  getUserForRequest,
+  requestEmailCode,
+  sessionCookie,
+  verifyEmailCode,
+} = require('./authService');
+const { completeReservation, findReservation, reserveEbook } = require('./entitlementService');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+app.set('trust proxy', process.env.NODE_ENV === 'production' ? 1 : false);
 
 // ---------------------------------------------------------------------------
 // Middlewares
@@ -50,6 +62,8 @@ app.get('/api/status', (req, res) => {
       mistral: pools.mistral.length,
       openrouter: pools.openrouter.length,
       cloudflare: pools.cloudflare.length,
+      database: Boolean(process.env.DATABASE_URL),
+      emailLogin: Boolean(process.env.DATABASE_URL && process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS && process.env.AUTH_SESSION_SECRET),
     },
   });
 });
@@ -57,6 +71,85 @@ app.get('/api/status', (req, res) => {
 app.get('/api/health', (req, res) => {
   res.json({ status: 'healthy', uptimeSeconds: process.uptime() });
 });
+
+app.post('/api/auth/request-code', async (req, res) => {
+  try {
+    const result = await requestEmailCode(req.body && req.body.email, req.ip);
+    return res.json({ success: true, email: result.email, message: 'Confira sua caixa de entrada para pegar o código.' });
+  } catch (error) {
+    return res.status(error.status || 503).json({
+      error: error.message || 'Não foi possível enviar o código de acesso.',
+      retryAfter: error.retryAfter || null,
+    });
+  }
+});
+
+app.post('/api/auth/verify-code', async (req, res) => {
+  try {
+    const result = await verifyEmailCode(req.body && req.body.email, req.body && req.body.code, req.ip);
+    const secure = process.env.NODE_ENV === 'production' || req.get('x-forwarded-proto') === 'https';
+    res.setHeader('Set-Cookie', sessionCookie(result.sessionToken, result.expiresAt, secure));
+    return res.json({ success: true, user: result.user });
+  } catch (error) {
+    return res.status(error.status || 503).json({ error: error.message || 'Não foi possível confirmar o código.' });
+  }
+});
+
+app.get('/api/auth/me', async (req, res) => {
+  try {
+    const user = await getUserForRequest(req);
+    return res.json({ authenticated: Boolean(user), user });
+  } catch (error) {
+    return res.status(503).json({ error: error.message || 'O banco de dados não está disponível.' });
+  }
+});
+
+app.post('/api/auth/logout', async (req, res) => {
+  try {
+    await destroySession(req);
+    const secure = process.env.NODE_ENV === 'production' || req.get('x-forwarded-proto') === 'https';
+    res.setHeader('Set-Cookie', expiredSessionCookie(secure));
+    return res.json({ success: true });
+  } catch (error) {
+    return res.status(503).json({ error: error.message || 'Não foi possível encerrar a sessão.' });
+  }
+});
+
+async function requireUser(req, res, next) {
+  try {
+    req.user = await getUserForRequest(req);
+    if (!req.user) return res.status(401).json({ error: 'Entre com seu e-mail para continuar.' });
+    return next();
+  } catch (error) {
+    return res.status(503).json({ error: error.message || 'A autenticação está indisponível.' });
+  }
+}
+
+async function loadOptionalUser(req, res, next) {
+  try {
+    req.user = await getUserForRequest(req);
+    return next();
+  } catch (error) {
+    return res.status(503).json({ error: error.message || 'A autenticação está indisponível.' });
+  }
+}
+
+async function requireEbookReservation(req, res, next) {
+  try {
+    const reservation = await findReservation(
+      req.user && req.user.id,
+      req.body && req.body.reservationId,
+      digestSignupIp(req.ip)
+    );
+    if (!reservation || reservation.status !== 'pending') {
+      return res.status(403).json({ error: 'Inicie ou retome um e-book antes de gerar conteúdo.' });
+    }
+    req.ebookReservation = reservation;
+    return next();
+  } catch (error) {
+    return res.status(503).json({ error: error.message || 'Não foi possível verificar sua cota.' });
+  }
+}
 
 // ---------------------------------------------------------------------------
 // GET /api/research-status
@@ -73,12 +166,25 @@ app.get('/api/research-status', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/ebooks/reserve
+// Reserva a cortesia única ou confirma acesso por plano pago/administrador.
+// ---------------------------------------------------------------------------
+app.post('/api/ebooks/reserve', loadOptionalUser, async (req, res) => {
+  try {
+    const reservation = await reserveEbook(req.user, digestSignupIp(req.ip));
+    return res.json({ success: true, ...reservation });
+  } catch (error) {
+    return res.status(error.status || 503).json({ error: error.message || 'Não foi possível reservar seu e-book.' });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/generate-block
 // Gera 1 bloco (~350-400 palavras) de um capítulo, passando pela esteira
 // tripla sequencial (Gemini -> Groq -> Mistral). Dividido em blocos pequenos
 // para nunca ultrapassar o timeout de 30s do Render.
 // ---------------------------------------------------------------------------
-app.post('/api/generate-block', async (req, res) => {
+app.post('/api/generate-block', loadOptionalUser, requireEbookReservation, async (req, res) => {
   const { bookTitle, chapterTitle, blockNumber, niche, targetAudience, tone, recentContext, bookDescription, blocksPerChapter, language, allChapterTitles } = req.body || {};
 
   const missing = [];
@@ -163,7 +269,7 @@ app.post('/api/generate-block', async (req, res) => {
 // A IA decide sozinha o subtítulo, a descrição e os títulos dos capítulos —
 // a pessoa só informa o título, o nicho, o público e quantos capítulos quer.
 // ---------------------------------------------------------------------------
-app.post('/api/generate-outline', async (req, res) => {
+app.post('/api/generate-outline', loadOptionalUser, requireEbookReservation, async (req, res) => {
   const { bookTitle, niche, targetAudience, tone, numChapters, language } = req.body || {};
 
   const missing = [];
@@ -206,12 +312,10 @@ app.post('/api/generate-outline', async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // POST /api/generate-cover
-// Tenta primeiro o Gemini (gemini-3.1-flash-image), que escreve título,
-// subtítulo e autor de verdade na imagem. Se as chaves do Gemini falharem
-// todas, cai para o Pollinations como reserva (esse não escreve texto).
+// Gera capas exclusivamente com o Gemini.
 // Body: { title, subtitle?, author?, niche, stylePreference? }
 // ---------------------------------------------------------------------------
-app.post('/api/generate-cover', async (req, res) => {
+app.post('/api/generate-cover', loadOptionalUser, requireEbookReservation, async (req, res) => {
   const { title, subtitle, author, niche, stylePreference } = req.body || {};
 
   if (!title || !niche) {
@@ -231,25 +335,18 @@ app.post('/api/generate-cover', async (req, res) => {
     });
     return res.json({
       success: true,
-      mode: 'gemini',
       imageBase64: image.bytes.toString('base64'),
       mimeType: image.mimeType,
       title,
       niche,
     });
-  } catch (geminiError) {
-    console.error('Gemini falhou ao gerar a capa, tentando reserva (Pollinations):', geminiError.message);
-    try {
-      const cover = generateCoverUrl({ title, niche, stylePreference });
-      return res.json({ success: true, mode: 'pollinations', ...cover });
-    } catch (error) {
-      console.error('Erro ao gerar capa (reserva também falhou):', error);
-      return res.status(500).json({
-        success: false,
-        error: 'Falha ao gerar a capa (Gemini e a reserva falharam).',
-        details: `Gemini: ${geminiError.message} | Reserva: ${error.message}`,
-      });
-    }
+  } catch (error) {
+    console.error('Gemini falhou ao gerar a capa:', error.message);
+    return res.status(503).json({
+      success: false,
+      error: 'O Gemini não conseguiu gerar a capa. Tente novamente mais tarde.',
+      details: error.message,
+    });
   }
 });
 
@@ -257,17 +354,16 @@ app.post('/api/generate-cover', async (req, res) => {
 // POST /api/build-book
 // Monta o PDF e o EPUB finais a partir dos capítulos já gerados (texto puro).
 // NÃO chama nenhuma IA aqui — só formata o que já foi gerado, então é rápido
-// e nunca esbarra no limite de 30s do Render. Não exige login.
+// e nunca esbarra no limite de 30s do Render. Exige usuário e reserva ativa.
 // Body esperado:
 // {
 //   "title": "...", "subtitle": "...", "author": "...",
 //   "chapters": [ { "position": 1, "title": "...", "content": "..." }, ... ],
-//   "coverBase64": "...", "coverMime": "image/png"   (preferido — vem direto do /api/generate-cover no modo Gemini)
-//   "coverUrl": "https://..."                          (alternativa — baixa de uma URL, ex: modo Pollinations)
+//   "coverBase64": "...", "coverMime": "image/png" (gerados pelo Gemini)
 // }
 // ---------------------------------------------------------------------------
-app.post('/api/build-book', async (req, res) => {
-  const { title, subtitle, author, chapters, coverUrl, coverBase64, coverMime: coverMimeIn } = req.body || {};
+app.post('/api/build-book', loadOptionalUser, requireEbookReservation, async (req, res) => {
+  const { title, subtitle, author, chapters, coverBase64, coverMime: coverMimeIn } = req.body || {};
 
   if (!title || !author || !Array.isArray(chapters) || chapters.length === 0) {
     return res.status(400).json({
@@ -282,18 +378,6 @@ app.post('/api/build-book', async (req, res) => {
       // Capa já veio pronta em base64 (modo Gemini) — não precisa baixar nada.
       coverBytes = new Uint8Array(Buffer.from(coverBase64, 'base64'));
       coverMime = coverMimeIn || 'image/png';
-    } else if (coverUrl) {
-      try {
-        const fetch = require('node-fetch');
-        const imgRes = await fetch(coverUrl);
-        if (imgRes.ok) {
-          const buf = await imgRes.buffer();
-          coverBytes = new Uint8Array(buf);
-          coverMime = imgRes.headers.get('content-type') || 'image/png';
-        }
-      } catch (imgErr) {
-        console.error('Não foi possível baixar a capa, seguindo sem ela:', imgErr.message);
-      }
     }
 
     const buildInput = {
@@ -311,6 +395,14 @@ app.post('/api/build-book', async (req, res) => {
 
     const pdfBytes = await buildPdf(buildInput);
     const epubBytes = buildEpub(buildInput);
+    const completed = await completeReservation(
+      req.user && req.user.id,
+      req.ebookReservation.id,
+      digestSignupIp(req.ip)
+    );
+    if (!completed) {
+      return res.status(409).json({ success: false, error: 'Esta reserva já foi concluída ou não está mais ativa.' });
+    }
 
     return res.json({
       success: true,
@@ -335,32 +427,38 @@ app.post('/api/build-book', async (req, res) => {
 // ou vitalício), retornando o link de pagamento (PIX, boleto ou cartão).
 // Body: { name, email, cpfCnpj, plan: "monthly" | "lifetime" }
 // ---------------------------------------------------------------------------
-app.post('/api/create-payment', async (req, res) => {
-  const { name, email, cpfCnpj, plan } = req.body || {};
+app.post('/api/create-payment', requireUser, async (req, res) => {
+  const { name, cpfCnpj, plan, coupon } = req.body || {};
 
-  const missing = [];
-  if (!name) missing.push('name');
-  if (!email) missing.push('email');
-  if (!cpfCnpj) missing.push('cpfCnpj');
-  if (!plan) missing.push('plan');
-  if (missing.length > 0) {
-    return res.status(400).json({ error: 'Campos obrigatórios ausentes.', missingFields: missing });
+  if (!cpfCnpj || !plan) {
+    return res.status(400).json({ error: 'Informe CPF/CNPJ e o plano desejado.' });
   }
   if (plan !== 'monthly' && plan !== 'lifetime') {
     return res.status(400).json({ error: 'plan deve ser "monthly" ou "lifetime".' });
   }
 
   try {
-    const customerId = await findOrCreateCustomer({ name, email, cpfCnpj });
-    const externalReference = `${email}-${Date.now()}`;
-    const description = `Gerador de E-book — ${PLANS[plan].label}`;
+    const email = req.user.email;
+    const customerId = await findOrCreateCustomer({ name: name || email, email, cpfCnpj });
+    const externalReference = `ebook-${req.user.id}-${crypto.randomUUID()}`;
+    const couponCode = typeof coupon === 'string' && coupon.trim().toLowerCase() === 'chequetto30'
+      ? 'chequetto30'
+      : null;
+    const amount = Number((PLANS[plan].price * (couponCode ? 0.7 : 1)).toFixed(2));
+    const description = `Gerador de E-book — ${PLANS[plan].label}${couponCode ? ' (cupom 30%)' : ''}`;
 
     const result =
       plan === 'lifetime'
-        ? await createLifetimeCharge({ customerId, description, externalReference })
-        : await createMonthlySubscription({ customerId, description, externalReference });
+        ? await createLifetimeCharge({ customerId, description, externalReference, value: amount })
+        : await createMonthlySubscription({ customerId, description, externalReference, value: amount });
 
-    return res.json({ success: true, plan, ...result });
+    await getPool().query(
+      `INSERT INTO payments (user_id, external_reference, asaas_payment_id, subscription_id, plan, coupon_code, amount)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [req.user.id, externalReference, result.paymentId, result.subscriptionId, plan, couponCode, amount]
+    );
+
+    return res.json({ success: true, plan, amount, coupon: couponCode, ...result });
   } catch (error) {
     console.error('Erro ao criar cobrança Asaas:', error);
     return res.status(500).json({ success: false, error: 'Falha ao criar a cobrança.', details: error.message });
@@ -371,13 +469,36 @@ app.post('/api/create-payment', async (req, res) => {
 // GET /api/payment-status/:id
 // Consulta o status de um pagamento (PENDING, RECEIVED, CONFIRMED, OVERDUE...).
 // ---------------------------------------------------------------------------
-app.get('/api/payment-status/:id', async (req, res) => {
+app.get('/api/payment-status/:id', requireUser, async (req, res) => {
   try {
+    const ownedPayment = await getPool().query(
+      'SELECT id FROM payments WHERE asaas_payment_id = $1 AND user_id = $2',
+      [req.params.id, req.user.id]
+    );
+    if (!ownedPayment.rowCount) return res.status(404).json({ error: 'Cobrança não encontrada.' });
     const status = await getPaymentStatus(req.params.id);
     return res.json({ success: true, ...status });
   } catch (error) {
     console.error('Erro ao consultar pagamento:', error);
     return res.status(500).json({ success: false, error: 'Falha ao consultar o pagamento.', details: error.message });
+  }
+});
+
+app.get('/api/admin/users', requireUser, async (req, res) => {
+  if (!req.user.is_admin) return res.status(403).json({ error: 'Acesso restrito ao administrador.' });
+  try {
+    const result = await getPool().query(
+      `SELECT u.id, u.email, u.free_ebook_used, u.has_lifetime_access, u.paid_until,
+              u.created_at,
+              COUNT(p.id) FILTER (WHERE p.status IN ('RECEIVED', 'CONFIRMED'))::INTEGER AS paid_count,
+              COUNT(p.id) FILTER (WHERE p.status = 'PENDING')::INTEGER AS pending_count,
+              COALESCE(SUM(p.amount) FILTER (WHERE p.status IN ('RECEIVED', 'CONFIRMED')), 0) AS paid_total
+         FROM users u LEFT JOIN payments p ON p.user_id = u.id
+        GROUP BY u.id ORDER BY u.created_at DESC`
+    );
+    return res.json({ success: true, users: result.rows });
+  } catch (error) {
+    return res.status(503).json({ error: 'Não foi possível carregar os usuários.' });
   }
 });
 
@@ -387,11 +508,59 @@ app.get('/api/payment-status/:id', async (req, res) => {
 // status (confirmado, atrasado, etc). Configure esta URL no painel do Asaas:
 // Configurações -> Webhooks -> https://SEU-APP.onrender.com/api/asaas-webhook
 // ---------------------------------------------------------------------------
-app.post('/api/asaas-webhook', (req, res) => {
+app.post('/api/asaas-webhook', async (req, res) => {
   const event = req.body || {};
-  console.log('📩 Webhook Asaas recebido:', event.event, '-', event.payment && event.payment.id);
-  // Aqui é onde, no futuro, se marcaria o pedido como pago no seu banco de dados.
-  res.status(200).json({ received: true });
+  const expectedToken = process.env.ASAAS_WEBHOOK_TOKEN || '';
+  const receivedToken = req.get('asaas-access-token') || '';
+  const expectedBuffer = Buffer.from(expectedToken);
+  const receivedBuffer = Buffer.from(receivedToken);
+  if (!expectedToken || expectedBuffer.length !== receivedBuffer.length || !crypto.timingSafeEqual(expectedBuffer, receivedBuffer)) {
+    return res.status(401).json({ error: 'Token do webhook inválido.' });
+  }
+
+  const payment = event.payment || {};
+  const paidStatuses = ['PAYMENT_RECEIVED', 'PAYMENT_CONFIRMED'];
+  if (!paidStatuses.includes(event.event)) return res.status(200).json({ received: true });
+
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      `SELECT * FROM payments
+        WHERE asaas_payment_id = $1 OR external_reference = $2 OR subscription_id = $3
+        ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
+      [payment.id || null, payment.externalReference || null, payment.subscription || null]
+    );
+    const storedPayment = result.rows[0];
+    if (!storedPayment) {
+      await client.query('ROLLBACK');
+      return res.status(202).json({ received: true, matched: false });
+    }
+
+    if (!['RECEIVED', 'CONFIRMED'].includes(storedPayment.status)) {
+      await client.query(
+        'UPDATE payments SET status = $1, updated_at = NOW() WHERE id = $2',
+        [payment.status || event.event.replace('PAYMENT_', ''), storedPayment.id]
+      );
+      if (storedPayment.plan === 'lifetime') {
+        await client.query('UPDATE users SET has_lifetime_access = TRUE WHERE id = $1', [storedPayment.user_id]);
+      } else {
+        await client.query(
+          `UPDATE users SET paid_until = GREATEST(COALESCE(paid_until, NOW()), NOW()) + INTERVAL '30 days'
+            WHERE id = $1`,
+          [storedPayment.user_id]
+        );
+      }
+    }
+    await client.query('COMMIT');
+    return res.status(200).json({ received: true, matched: true });
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    console.error('Erro ao processar webhook Asaas:', error.message);
+    return res.status(500).json({ error: 'Falha ao processar notificação.' });
+  } finally {
+    client.release();
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -410,9 +579,21 @@ app.use((err, req, res, next) => {
 // ---------------------------------------------------------------------------
 // Inicialização
 // ---------------------------------------------------------------------------
-app.listen(PORT, () => {
+function listen() {
+  app.listen(PORT, () => {
   console.log(`✅ Servidor rodando na porta ${PORT}`);
   console.log(
     `🔑 Chaves configuradas — Gemini: ${pools.gemini.length} | Groq: ${pools.groq.length} | Mistral: ${pools.mistral.length} | OpenRouter: ${pools.openrouter.length} | Cloudflare: ${pools.cloudflare.length}`
   );
-});
+  });
+}
+
+if (process.env.DATABASE_URL) {
+  initializeStore().then(listen).catch((error) => {
+    console.error('Não foi possível inicializar o banco PostgreSQL:', error.message);
+    process.exitCode = 1;
+  });
+} else {
+  console.warn('DATABASE_URL não configurada; login, cota e pagamentos ficam indisponíveis.');
+  listen();
+}
