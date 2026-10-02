@@ -711,20 +711,18 @@ async function gerarLivroCompleto() {
 
   try {
     if (!saved) saved = { signature, chapters: [] };
-    if (!saved.reservationId) {
-      const reservationResponse = await apiFetch(base + '/api/ebooks/reserve', { method: 'POST' });
-      const reservation = await reservationResponse.json();
-      if (reservationResponse.status === 402) {
-        document.getElementById('accountStatus').textContent = reservation.error + ' Informe seu e-mail para continuar.';
-        document.getElementById('planos').scrollIntoView({ behavior: 'smooth', block: 'start' });
-        return;
-      }
-      if (!reservationResponse.ok || !reservation.success) {
-        throw new Error(reservation.error || 'Não foi possível reservar seu e-book.');
-      }
-      saved.reservationId = reservation.reservationId;
-      saveProgress(saved);
+    const reservationResponse = await apiFetch(base + '/api/ebooks/reserve', { method: 'POST' });
+    const reservation = await reservationResponse.json();
+    if (reservationResponse.status === 402) {
+      document.getElementById('accountStatus').textContent = reservation.error + ' Informe seu e-mail para continuar.';
+      document.getElementById('planos').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
     }
+    if (!reservationResponse.ok || !reservation.success) {
+      throw new Error(reservation.error || 'Não foi possível reservar seu e-book.');
+    }
+    saved.reservationId = reservation.reservationId;
+    saveProgress(saved);
     const reservationId = saved.reservationId;
     const isResuming = saved.subtitle !== undefined;
     let subtitle, bookDescription, chapterTitles;
