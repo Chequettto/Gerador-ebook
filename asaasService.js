@@ -15,6 +15,19 @@ const PLANS = {
   lifetime: { id: 'lifetime', label: 'Plano Vitalício', price: 299, recurring: false },
 };
 
+function calculatePlanPrice(plan, couponInput) {
+  const selectedPlan = PLANS[plan];
+  if (!selectedPlan) throw new Error('Plano inválido.');
+  const configuredCoupon = String(process.env.PRIVATE_COUPON_CODE || '').trim().toLowerCase();
+  const couponCode = configuredCoupon && typeof couponInput === 'string' && couponInput.trim().toLowerCase() === configuredCoupon
+    ? configuredCoupon
+    : null;
+  return {
+    couponCode,
+    amount: Number((selectedPlan.price * (couponCode ? 0.7 : 1)).toFixed(2)),
+  };
+}
+
 function apiBase() {
   return (process.env.ASAAS_BASE_URL || 'https://api.asaas.com/v3').replace(/\/$/, '');
 }
@@ -103,6 +116,25 @@ async function createMonthlySubscription({ customerId, description, externalRefe
   };
 }
 
+async function createHostedPaymentLink({ plan, description, value }) {
+  const selectedPlan = PLANS[plan];
+  if (!selectedPlan) throw new Error('Plano inválido.');
+  const paymentLink = await asaasFetch('/paymentLinks', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: selectedPlan.label,
+      description,
+      value,
+      billingType: plan === 'monthly' ? 'CREDIT_CARD' : 'UNDEFINED',
+      chargeType: plan === 'monthly' ? 'RECURRENT' : 'DETACHED',
+      ...(plan === 'monthly' ? { subscriptionCycle: 'MONTHLY' } : { dueDateLimitDays: 7 }),
+      notificationEnabled: true,
+    }),
+  });
+  if (!paymentLink.id || !paymentLink.url) throw new Error('O Asaas não retornou o link de checkout.');
+  return { paymentLinkId: paymentLink.id, url: paymentLink.url };
+}
+
 async function getPaymentStatus(paymentId) {
   const payment = await asaasFetch(`/payments/${paymentId}`);
   return { id: payment.id, status: payment.status, value: payment.value };
@@ -110,8 +142,10 @@ async function getPaymentStatus(paymentId) {
 
 module.exports = {
   PLANS,
+  calculatePlanPrice,
   findOrCreateCustomer,
   createLifetimeCharge,
   createMonthlySubscription,
+  createHostedPaymentLink,
   getPaymentStatus,
 };

@@ -9,8 +9,8 @@ const crypto = require('crypto');
 
 const { generateBlock, generateOutline, refineOutline, generateCoverImageWithGemini, pools } = require('./aiService');
 const { buildPdf, buildEpub } = require('./bookBuildService');
-const { generateCommonsCover, generateLocalCoverSvg } = require('./coverService');
-const { PLANS, findOrCreateCustomer, createLifetimeCharge, createMonthlySubscription, getPaymentStatus } = require('./asaasService');
+const { generateCommonsCover, generateLocalCoverSvg, warmCoverCatalog } = require('./coverService');
+const { PLANS, calculatePlanPrice, findOrCreateCustomer, createLifetimeCharge, createMonthlySubscription, createHostedPaymentLink, getPaymentStatus } = require('./asaasService');
 const researchEngine = require('./research/researchEngine');
 const { compressReferenceText } = require('./promptCompression');
 const { getPool, hasDatabase, initializeStore } = require('./accountStore');
@@ -28,6 +28,16 @@ const { completeReservation, findReservation, reserveEbook } = require('./entitl
 const app = express();
 const PORT = process.env.PORT || 3000;
 app.set('trust proxy', process.env.NODE_ENV === 'production' ? 1 : false);
+
+function normalizeIpAddress(ip) {
+  return String(ip || '').trim().toLowerCase().replace(/^::ffff:/, '');
+}
+
+function isAdminIp(ip) {
+  const address = normalizeIpAddress(ip);
+  const adminIps = (process.env.ADMIN_IPS || '').split(',').map(normalizeIpAddress).filter(Boolean);
+  return Boolean(address && adminIps.includes(address));
+}
 
 // ---------------------------------------------------------------------------
 // Middlewares
@@ -181,7 +191,7 @@ app.get('/api/research-status', (req, res) => {
 // ---------------------------------------------------------------------------
 app.post('/api/ebooks/reserve', loadOptionalUser, async (req, res) => {
   try {
-    const reservation = await reserveEbook(req.user, digestSignupIp(req.ip));
+    const reservation = await reserveEbook(req.user, digestSignupIp(req.ip), isAdminIp(req.ip));
     return res.json({ success: true, ...reservation });
   } catch (error) {
     return res.status(error.status || 503).json({ error: error.message || 'Não foi possível reservar seu e-book.' });
@@ -515,6 +525,52 @@ app.post('/api/build-book', loadOptionalUser, requireEbookReservation, async (re
 // ou vitalício), retornando o link de pagamento (PIX, boleto ou cartão).
 // Body: { name, email, cpfCnpj, plan: "monthly" | "lifetime" }
 // ---------------------------------------------------------------------------
+app.post('/api/create-checkout', loadOptionalUser, async (req, res) => {
+  const { plan, coupon } = req.body || {};
+  if (!['monthly', 'lifetime'].includes(plan)) {
+    return res.status(400).json({ error: 'Escolha um plano mensal ou vitalício.' });
+  }
+  if (!hasDatabase()) {
+    return res.status(503).json({ error: 'O checkout requer banco de dados para ativar o plano após a confirmação do Asaas.' });
+  }
+
+  try {
+    const ipHash = digestSignupIp(req.ip);
+    const { couponCode, amount } = calculatePlanPrice(plan, coupon);
+    const pending = await getPool().query(
+      `SELECT payment_link_id, checkout_url, amount, coupon_code FROM payments
+        WHERE ip_hash = $1 AND plan = $2 AND status = 'PENDING'
+          AND coupon_code IS NOT DISTINCT FROM $3
+          AND created_at > NOW() - INTERVAL '1 day'
+        ORDER BY created_at DESC LIMIT 1`,
+      [ipHash, plan, couponCode]
+    );
+    if (pending.rows[0] && pending.rows[0].checkout_url) {
+      return res.json({
+        success: true,
+        plan,
+        amount: Number(pending.rows[0].amount),
+        coupon: pending.rows[0].coupon_code,
+        reused: true,
+        url: pending.rows[0].checkout_url,
+      });
+    }
+
+    const description = `Gerador de E-book — ${PLANS[plan].label}${couponCode ? ' (cupom 30%)' : ''}`;
+    const checkout = await createHostedPaymentLink({ plan, description, value: amount });
+    const externalReference = `checkout-${crypto.randomUUID()}`;
+    await getPool().query(
+      `INSERT INTO payments (user_id, ip_hash, external_reference, payment_link_id, checkout_url, plan, coupon_code, amount)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [req.user && req.user.id || null, ipHash, externalReference, checkout.paymentLinkId, checkout.url, plan, couponCode, amount]
+    );
+    return res.json({ success: true, plan, amount, coupon: couponCode, reused: false, ...checkout });
+  } catch (error) {
+    console.error('Erro ao criar checkout Asaas:', error);
+    return res.status(503).json({ success: false, error: 'Não foi possível abrir o checkout do Asaas.', details: error.message });
+  }
+});
+
 app.post('/api/create-payment', requireUser, async (req, res) => {
   const { name, cpfCnpj, plan, coupon } = req.body || {};
 
@@ -529,10 +585,7 @@ app.post('/api/create-payment', requireUser, async (req, res) => {
     const email = req.user.email;
     const customerId = await findOrCreateCustomer({ name: name || email, email, cpfCnpj });
     const externalReference = `ebook-${req.user.id}-${crypto.randomUUID()}`;
-    const couponCode = typeof coupon === 'string' && coupon.trim().toLowerCase() === 'chequetto30'
-      ? 'chequetto30'
-      : null;
-    const amount = Number((PLANS[plan].price * (couponCode ? 0.7 : 1)).toFixed(2));
+    const { couponCode, amount } = calculatePlanPrice(plan, coupon);
     const description = `Gerador de E-book — ${PLANS[plan].label}${couponCode ? ' (cupom 30%)' : ''}`;
 
     const result =
@@ -615,9 +668,9 @@ app.post('/api/asaas-webhook', async (req, res) => {
     await client.query('BEGIN');
     const result = await client.query(
       `SELECT * FROM payments
-        WHERE asaas_payment_id = $1 OR external_reference = $2 OR subscription_id = $3
+        WHERE asaas_payment_id = $1 OR external_reference = $2 OR subscription_id = $3 OR payment_link_id = $4
         ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
-      [payment.id || null, payment.externalReference || null, payment.subscription || null]
+      [payment.id || null, payment.externalReference || null, payment.subscription || null, payment.paymentLink || null]
     );
     const storedPayment = result.rows[0];
     if (!storedPayment) {
@@ -625,11 +678,22 @@ app.post('/api/asaas-webhook', async (req, res) => {
       return res.status(202).json({ received: true, matched: false });
     }
 
-    if (!['RECEIVED', 'CONFIRMED'].includes(storedPayment.status)) {
-      await client.query(
-        'UPDATE payments SET status = $1, updated_at = NOW() WHERE id = $2',
-        [payment.status || event.event.replace('PAYMENT_', ''), storedPayment.id]
-      );
+    const paymentEvent = await client.query(
+      `INSERT INTO asaas_payment_events (asaas_payment_id, payment_link_id)
+       VALUES ($1, $2) ON CONFLICT (asaas_payment_id) DO NOTHING RETURNING asaas_payment_id`,
+      [payment.id, payment.paymentLink || null]
+    );
+    if (!paymentEvent.rowCount) {
+      await client.query('COMMIT');
+      return res.status(200).json({ received: true, matched: true, duplicate: true });
+    }
+
+    await client.query(
+      `UPDATE payments SET status = $1, asaas_payment_id = COALESCE(asaas_payment_id, $2), updated_at = NOW()
+        WHERE id = $3`,
+      [payment.status || event.event.replace('PAYMENT_', ''), payment.id, storedPayment.id]
+    );
+    if (storedPayment.user_id) {
       if (storedPayment.plan === 'lifetime') {
         await client.query('UPDATE users SET has_lifetime_access = TRUE WHERE id = $1', [storedPayment.user_id]);
       } else {
@@ -637,6 +701,24 @@ app.post('/api/asaas-webhook', async (req, res) => {
           `UPDATE users SET paid_until = GREATEST(COALESCE(paid_until, NOW()), NOW()) + INTERVAL '30 days'
             WHERE id = $1`,
           [storedPayment.user_id]
+        );
+      }
+    } else if (storedPayment.ip_hash) {
+      if (storedPayment.plan === 'lifetime') {
+        await client.query(
+          `INSERT INTO ip_entitlements (ip_hash, has_lifetime_access)
+           VALUES ($1, TRUE)
+           ON CONFLICT (ip_hash) DO UPDATE SET has_lifetime_access = TRUE, updated_at = NOW()`,
+          [storedPayment.ip_hash]
+        );
+      } else {
+        await client.query(
+          `INSERT INTO ip_entitlements (ip_hash, paid_until)
+           VALUES ($1, NOW() + INTERVAL '30 days')
+           ON CONFLICT (ip_hash) DO UPDATE SET
+             paid_until = GREATEST(COALESCE(ip_entitlements.paid_until, NOW()), NOW()) + INTERVAL '30 days',
+             updated_at = NOW()`,
+          [storedPayment.ip_hash]
         );
       }
     }
@@ -673,6 +755,7 @@ function listen() {
   console.log(
     `🔑 Chaves configuradas — Gemini: ${pools.gemini.length} | Groq: ${pools.groq.length} | Mistral: ${pools.mistral.length} | OpenRouter: ${pools.openrouter.length} | Cloudflare: ${pools.cloudflare.length}`
   );
+  warmCoverCatalog().catch((error) => console.warn('[cover-catalog] Pré-carga indisponível:', error.message));
   });
 }
 

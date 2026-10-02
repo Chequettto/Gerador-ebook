@@ -13,15 +13,18 @@ const COVER_WIDTH = 800;
 const COVER_HEIGHT = 1200;
 const COMMONS_API = 'https://commons.wikimedia.org/w/api.php';
 const COMMONS_TIMEOUT_MS = 7000;
-const MAX_COVER_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_COVER_IMAGE_BYTES = 1536 * 1024;
+const COVER_ASSET_TARGET = 30;
 const { Resvg } = require('@resvg/resvg-js');
+const { databaseUnavailableError, getMemoryStore, getPool, hasDatabase } = require('./accountStore');
 
 const VISUAL_SEARCHES = [
-  { pattern: /finan|d[ií]vida|invest|poupan|or[cç]amento/i, searches: ['piggy bank savings', 'personal finance'] },
-  { pattern: /sa[uú]de|bem-estar|fitness/i, searches: ['healthy lifestyle nature', 'wellness health'] },
-  { pattern: /culin|cozinha|receita/i, searches: ['food cooking ingredients', 'culinary dish'] },
-  { pattern: /tecnolog|programa[cç][aã]o|software/i, searches: ['technology computer', 'electronics circuit'] },
-  { pattern: /produtividade|organiza[cç][aã]o/i, searches: ['organized desk workspace', 'office workspace'] },
+  { category: 'finance', pattern: /finan|d[ií]vida|invest|poupan|or[cç]amento/i, searches: ['piggy bank savings', 'coins savings money', 'personal finance', 'budget money'] },
+  { category: 'health', pattern: /sa[uú]de|bem-estar|fitness/i, searches: ['healthy lifestyle nature', 'wellness health', 'fitness exercise'] },
+  { category: 'food', pattern: /culin|cozinha|receita/i, searches: ['food cooking ingredients', 'culinary dish', 'fresh produce food'] },
+  { category: 'technology', pattern: /tecnolog|programa[cç][aã]o|software/i, searches: ['technology computer', 'electronics circuit', 'computer technology'] },
+  { category: 'productivity', pattern: /produtividade|organiza[cç][aã]o/i, searches: ['organized desk workspace', 'office workspace', 'productive workspace'] },
+  { category: 'general', pattern: /.*/, searches: ['nature landscape', 'botanical flower', 'abstract art texture'] },
 ];
 
 // Regras rígidas anti-texto exigidas na especificação
@@ -176,29 +179,45 @@ async function requestCommonsJson(url) {
 }
 
 async function downloadCommonsImage(url, expectedMime) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), COMMONS_TIMEOUT_MS);
-  try {
-    const response = await fetch(url, { signal: controller.signal });
-    if (!response.ok) throw new Error(`Download da imagem HTTP ${response.status}`);
-    const mime = String(response.headers.get('content-type') || expectedMime).split(';')[0].toLowerCase();
-    if (!['image/jpeg', 'image/png', 'image/webp'].includes(mime)) throw new Error('O resultado do Commons não é uma imagem bitmap compatível.');
-    const bytes = Buffer.from(await response.arrayBuffer());
-    if (!bytes.length || bytes.length > MAX_COVER_IMAGE_BYTES) throw new Error('O tamanho da imagem do Commons está fora do limite.');
-    return { bytes, mime };
-  } finally {
-    clearTimeout(timer);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), COMMONS_TIMEOUT_MS);
+    try {
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: { 'User-Agent': 'EbookCoverBuilder/1.0 (public-domain cover art)' },
+      });
+      if (response.status === 429 && attempt < 2) {
+        const retryAfter = Number(response.headers.get('retry-after'));
+        await new Promise((resolve) => setTimeout(resolve, Math.min(4000, retryAfter > 0 ? retryAfter * 1000 : 750 * (attempt + 1))));
+        continue;
+      }
+      if (!response.ok) throw new Error(`Download da imagem HTTP ${response.status}`);
+      const mime = String(response.headers.get('content-type') || expectedMime).split(';')[0].toLowerCase();
+      if (!['image/jpeg', 'image/png', 'image/webp'].includes(mime)) throw new Error('O resultado do Commons não é uma imagem bitmap compatível.');
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (!bytes.length || bytes.length > MAX_COVER_IMAGE_BYTES) throw new Error('O tamanho da imagem do Commons está fora do limite.');
+      return { bytes, mime };
+    } finally {
+      clearTimeout(timer);
+    }
   }
+  throw new Error('Wikimedia Commons limitou o download da imagem após novas tentativas.');
 }
 
-async function generateCommonsCover({ title, subtitle, author, niche }) {
-  const visualSearch = VISUAL_SEARCHES.find(({ pattern }) => pattern.test(niche || ''));
-  const searches = [...new Set([
-    ...(visualSearch ? [visualSearch.searches[0]] : []),
-    `${niche} ${title}`,
-    niche,
-  ].filter(Boolean))].slice(0, 2);
-  let selected = null;
+function categoryForNiche(niche) {
+  return VISUAL_SEARCHES.find(({ pattern }) => pattern.test(niche || ''))?.category || 'general';
+}
+
+function commonsSourceUrl(pageTitle) {
+  const fileName = pageTitle.replace(/^File:/, '').replace(/ /g, '_');
+  return `https://commons.wikimedia.org/wiki/${encodeURIComponent(fileName)}`;
+}
+
+async function searchCommonsCandidates(searches, category, limit = COVER_ASSET_TARGET) {
+  const candidates = [];
+  const seen = new Set();
+  let lastError = null;
   for (const search of searches) {
     const url = new URL(COMMONS_API);
     url.search = new URLSearchParams({
@@ -206,34 +225,225 @@ async function generateCommonsCover({ title, subtitle, author, niche }) {
       generator: 'search',
       gsrsearch: search,
       gsrnamespace: '6',
-      gsrlimit: '20',
+      gsrlimit: '50',
       prop: 'imageinfo',
       iiprop: 'url|extmetadata|mime',
-      iiurlwidth: '1400',
+      iiurlwidth: '960',
       format: 'json',
     });
-    const data = await requestCommonsJson(url);
-    const candidates = Object.values(data.query?.pages || {})
-      .map((page) => ({ page, image: page.imageinfo?.[0] }))
-      .filter(({ image }) => image && image.thumburl && ['image/jpeg', 'image/png', 'image/webp'].includes(image.mime) && hasFreeImageLicense(image.extmetadata));
-    if (candidates.length) {
-      selected = candidates[0];
-      break;
+    try {
+      const data = await requestCommonsJson(url);
+      const pages = Object.values(data.query?.pages || {});
+      for (const page of pages) {
+        const image = page.imageinfo?.[0];
+        if (!image || !image.thumburl || !['image/jpeg', 'image/png', 'image/webp'].includes(image.mime) || !hasFreeImageLicense(image.extmetadata)) continue;
+        const sourceUrl = commonsSourceUrl(page.title);
+        if (seen.has(sourceUrl)) continue;
+        seen.add(sourceUrl);
+        candidates.push({
+          sourceUrl,
+          sourceTitle: page.title.replace(/^File:/, ''),
+          imageUrl: image.thumburl,
+          imageMime: image.mime,
+          license: image.extmetadata.LicenseShortName?.value || 'Public domain / CC0',
+          category,
+        });
+        if (candidates.length >= limit) return candidates;
+      }
+    } catch (error) {
+      lastError = error;
     }
   }
-  if (!selected) throw new Error('O Wikimedia Commons não encontrou imagem bitmap em domínio público ou CC0 para este tema.');
+  if (!candidates.length && lastError) throw lastError;
+  return candidates;
+}
 
-  const image = await downloadCommonsImage(selected.image.thumburl, selected.image.mime);
+function getMemoryAssetCount() {
+  return getMemoryStore().coverAssets.size;
+}
+
+async function getCoverAssetCount() {
+  if (!hasDatabase()) return getMemoryAssetCount();
+  try {
+    const result = await getPool().query('SELECT COUNT(*)::INTEGER AS count FROM ebook_cover_assets');
+    return result.rows[0].count;
+  } catch (error) {
+    if (!databaseUnavailableError(error)) throw error;
+    return getMemoryAssetCount();
+  }
+}
+
+async function getKnownCoverSources() {
+  if (!hasDatabase()) return new Set(getMemoryStore().coverAssets.keys());
+  try {
+    const result = await getPool().query('SELECT source_url FROM ebook_cover_assets');
+    return new Set(result.rows.map((row) => row.source_url));
+  } catch (error) {
+    if (!databaseUnavailableError(error)) throw error;
+    return new Set(getMemoryStore().coverAssets.keys());
+  }
+}
+
+async function saveCoverAsset(asset) {
+  if (hasDatabase()) {
+    try {
+      const result = await getPool().query(
+        `INSERT INTO ebook_cover_assets (source_url, source_title, image_mime, image_bytes, license, category)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (source_url) DO NOTHING
+         RETURNING id, source_url, source_title, image_mime, image_bytes, license, category, usage_count`,
+        [asset.sourceUrl, asset.sourceTitle, asset.imageMime, asset.bytes, asset.license, asset.category]
+      );
+      if (result.rows[0]) return result.rows[0];
+      const existing = await getPool().query(
+        `SELECT id, source_url, source_title, image_mime, image_bytes, license, category, usage_count
+           FROM ebook_cover_assets WHERE source_url = $1`,
+        [asset.sourceUrl]
+      );
+      if (existing.rows[0]) return existing.rows[0];
+    } catch (error) {
+      if (!databaseUnavailableError(error)) throw error;
+    }
+  }
+
+  const existing = getMemoryStore().coverAssets.get(asset.sourceUrl);
+  if (existing) return existing;
+  const stored = {
+    source_url: asset.sourceUrl,
+    source_title: asset.sourceTitle,
+    image_mime: asset.imageMime,
+    image_bytes: asset.bytes,
+    license: asset.license,
+    category: asset.category,
+    usage_count: 0,
+  };
+  getMemoryStore().coverAssets.set(asset.sourceUrl, stored);
+  return stored;
+}
+
+async function selectRotatingCoverAsset(category) {
+  if (hasDatabase()) {
+    let client;
+    try {
+      client = await getPool().connect();
+      await client.query('BEGIN');
+      const result = await client.query(
+        `SELECT id, source_url, source_title, image_mime, image_bytes, license, category, usage_count
+           FROM ebook_cover_assets
+          ORDER BY CASE WHEN category = $1 THEN 0 ELSE 1 END, usage_count ASC, random()
+          LIMIT 1 FOR UPDATE SKIP LOCKED`,
+        [category]
+      );
+      const asset = result.rows[0];
+      if (!asset) {
+        await client.query('COMMIT');
+        return null;
+      }
+      await client.query(
+        'UPDATE ebook_cover_assets SET usage_count = usage_count + 1, last_used_at = NOW() WHERE id = $1',
+        [asset.id]
+      );
+      await client.query('COMMIT');
+      return asset;
+    } catch (error) {
+      if (client) {
+        try { await client.query('ROLLBACK'); } catch (_) {}
+      }
+      if (!databaseUnavailableError(error)) throw error;
+    } finally {
+      if (client) client.release();
+    }
+  }
+
+  const assets = [...getMemoryStore().coverAssets.values()];
+  const preferred = assets.filter((asset) => asset.category === category);
+  const pool = preferred.length ? preferred : assets;
+  if (!pool.length) return null;
+  const lowestUsage = Math.min(...pool.map((asset) => asset.usage_count));
+  const leastUsed = pool.filter((asset) => asset.usage_count === lowestUsage);
+  const asset = leastUsed[Math.floor(Math.random() * leastUsed.length)];
+  asset.usage_count += 1;
+  return asset;
+}
+
+function catalogSearches() {
+  return VISUAL_SEARCHES.flatMap(({ category, searches }) => searches.map((search) => ({ category, search })));
+}
+
+async function seedCoverCatalog() {
+  const knownSources = await getKnownCoverSources();
+  if (knownSources.size >= COVER_ASSET_TARGET) return knownSources.size;
+  const candidateTarget = COVER_ASSET_TARGET + 10;
+  const candidates = [];
+  const candidateSources = new Set();
+  for (const { category, search } of catalogSearches()) {
+    if (knownSources.size + candidates.length >= candidateTarget) break;
+    try {
+      const found = await searchCommonsCandidates([search], category, candidateTarget - knownSources.size - candidates.length);
+      for (const candidate of found) {
+        if (knownSources.has(candidate.sourceUrl) || candidateSources.has(candidate.sourceUrl)) continue;
+        candidateSources.add(candidate.sourceUrl);
+        candidates.push(candidate);
+      }
+    } catch (error) {
+      console.warn(`[cover-catalog] Busca '${search}' falhou: ${error.message}`);
+    }
+  }
+
+  let count = knownSources.size;
+  for (const candidate of candidates) {
+    if (count >= COVER_ASSET_TARGET) break;
+    try {
+      const image = await downloadCommonsImage(candidate.imageUrl, candidate.imageMime);
+      await saveCoverAsset({ ...candidate, bytes: image.bytes, imageMime: image.mime });
+      count = await getCoverAssetCount();
+    } catch (error) {
+      console.warn(`[cover-catalog] Imagem '${candidate.sourceTitle}' não pôde ser guardada: ${error.message}`);
+    }
+  }
+  console.log(`[cover-catalog] ${count}/${COVER_ASSET_TARGET} capas livres disponíveis.`);
+  return count;
+}
+
+let catalogSeedPromise = null;
+function warmCoverCatalog() {
+  if (!catalogSeedPromise) {
+    catalogSeedPromise = seedCoverCatalog().finally(() => { catalogSeedPromise = null; });
+  }
+  return catalogSeedPromise;
+}
+
+async function getCoverAsset(niche, title) {
+  const category = categoryForNiche(niche);
+  let asset = await selectRotatingCoverAsset(category);
+  if (!asset) {
+    const visualSearch = VISUAL_SEARCHES.find((entry) => entry.category === category) || VISUAL_SEARCHES[VISUAL_SEARCHES.length - 1];
+    const searches = [...new Set([visualSearch.searches[0], `${niche} ${title}`, niche].filter(Boolean))];
+    const candidates = await searchCommonsCandidates(searches, category, 30);
+    if (!candidates.length) throw new Error('O Wikimedia Commons não encontrou imagem bitmap em domínio público ou CC0 para este tema.');
+    const candidate = candidates[Math.floor(Math.random() * candidates.length)];
+    const image = await downloadCommonsImage(candidate.imageUrl, candidate.imageMime);
+    await saveCoverAsset({ ...candidate, bytes: image.bytes, imageMime: image.mime });
+    asset = await selectRotatingCoverAsset(category);
+  }
+  warmCoverCatalog().catch((error) => console.warn('[cover-catalog] Pré-carga incompleta:', error.message));
+  if (!asset) throw new Error('Não foi possível selecionar uma imagem livre para a capa.');
+  return asset;
+}
+
+async function generateCommonsCover({ title, subtitle, author, niche }) {
+  const asset = await getCoverAsset(niche, title);
+  const image = { bytes: Buffer.from(asset.image_bytes), mime: asset.image_mime };
   const svg = composeCoverSvg({ image, title, subtitle, author, niche });
   const png = new Resvg(svg, { fitTo: { mode: 'width', value: COVER_WIDTH } }).render().asPng();
-  const pageTitle = selected.page.title.replace(/^File:/, '').replace(/ /g, '_');
+
   return {
     bytes: png,
     mimeType: 'image/png',
     source: 'Wikimedia Commons',
-    sourceTitle: selected.page.title.replace(/^File:/, ''),
-    sourceUrl: `https://commons.wikimedia.org/wiki/${encodeURIComponent(pageTitle)}`,
-    license: selected.image.extmetadata.LicenseShortName?.value || 'Public domain / CC0',
+    sourceTitle: asset.source_title,
+    sourceUrl: asset.source_url,
+    license: asset.license,
   };
 }
 
@@ -274,4 +484,5 @@ module.exports = {
   generateCoverUrl,
   generateCommonsCover,
   generateLocalCoverSvg,
+  warmCoverCatalog,
 };

@@ -7,6 +7,7 @@ const memoryStore = {
   emailCodes: new Map(),
   sessions: new Map(),
   reservations: new Map(),
+  coverAssets: new Map(),
 };
 
 const pool = process.env.DATABASE_URL
@@ -111,11 +112,28 @@ async function initializeStore() {
       ON ebook_reservations(ip_hash) WHERE ip_hash IS NOT NULL AND is_free;
     CREATE INDEX IF NOT EXISTS ebook_reservations_user_status_idx
       ON ebook_reservations(user_id, status);
+    CREATE TABLE IF NOT EXISTS ebook_cover_assets (
+      id BIGSERIAL PRIMARY KEY,
+      source_url TEXT NOT NULL UNIQUE,
+      source_title TEXT NOT NULL,
+      image_mime TEXT NOT NULL,
+      image_bytes BYTEA NOT NULL,
+      license TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'general',
+      usage_count INTEGER NOT NULL DEFAULT 0,
+      last_used_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS ebook_cover_assets_rotation_idx
+      ON ebook_cover_assets(category, usage_count, last_used_at);
     CREATE TABLE IF NOT EXISTS payments (
       id BIGSERIAL PRIMARY KEY,
-      user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+      ip_hash TEXT,
       external_reference TEXT NOT NULL UNIQUE,
       asaas_payment_id TEXT UNIQUE,
+      payment_link_id TEXT UNIQUE,
+      checkout_url TEXT,
       subscription_id TEXT,
       plan TEXT NOT NULL,
       coupon_code TEXT,
@@ -123,6 +141,23 @@ async function initializeStore() {
       status TEXT NOT NULL DEFAULT 'PENDING',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE payments ALTER COLUMN user_id DROP NOT NULL;
+    ALTER TABLE payments ADD COLUMN IF NOT EXISTS ip_hash TEXT;
+    ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_link_id TEXT;
+    ALTER TABLE payments ADD COLUMN IF NOT EXISTS checkout_url TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS payments_payment_link_id_unique
+      ON payments(payment_link_id) WHERE payment_link_id IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS ip_entitlements (
+      ip_hash TEXT PRIMARY KEY,
+      has_lifetime_access BOOLEAN NOT NULL DEFAULT FALSE,
+      paid_until TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS asaas_payment_events (
+      asaas_payment_id TEXT PRIMARY KEY,
+      payment_link_id TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
 }

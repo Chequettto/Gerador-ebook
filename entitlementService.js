@@ -16,9 +16,9 @@ function memoryReservationFor(user, ipHash) {
   return list.filter((reservation) => reservation.status === 'pending').sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0] || null;
 }
 
-async function reserveEbook(user, ipHash) {
+async function reserveEbook(user, ipHash, isAdminIp = false) {
   if (!hasDatabase()) {
-    return reserveEbookMemory(user, ipHash);
+    return reserveEbookMemory(user, ipHash, isAdminIp);
   }
 
   const db = getPool();
@@ -29,6 +29,49 @@ async function reserveEbook(user, ipHash) {
       if (!user) {
         if (!ipHash) throw Object.assign(new Error('Não foi possível identificar seu endereço de conexão.'), { status: 400 });
         await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [ipHash]);
+        if (isAdminIp) {
+          const pendingAdmin = await client.query(
+            `SELECT id FROM ebook_reservations
+              WHERE ip_hash = $1 AND NOT is_free AND status = 'pending'
+              ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
+            [ipHash]
+          );
+          if (pendingAdmin.rows[0]) {
+            await client.query('COMMIT');
+            return { reservationId: pendingAdmin.rows[0].id, isFree: false, resumed: true };
+          }
+          const reservationId = crypto.randomUUID();
+          await client.query(
+            'INSERT INTO ebook_reservations (id, ip_hash, is_free) VALUES ($1, $2, FALSE)',
+            [reservationId, ipHash]
+          );
+          await client.query('COMMIT');
+          return { reservationId, isFree: false, resumed: false };
+        }
+        const paidAccess = await client.query(
+          `SELECT has_lifetime_access OR paid_until > NOW() AS active
+             FROM ip_entitlements WHERE ip_hash = $1`,
+          [ipHash]
+        );
+        if (paidAccess.rows[0] && paidAccess.rows[0].active) {
+          const pendingPaid = await client.query(
+            `SELECT id FROM ebook_reservations
+              WHERE ip_hash = $1 AND NOT is_free AND status = 'pending'
+              ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
+            [ipHash]
+          );
+          if (pendingPaid.rows[0]) {
+            await client.query('COMMIT');
+            return { reservationId: pendingPaid.rows[0].id, isFree: false, resumed: true };
+          }
+          const reservationId = crypto.randomUUID();
+          await client.query(
+            'INSERT INTO ebook_reservations (id, ip_hash, is_free) VALUES ($1, $2, FALSE)',
+            [reservationId, ipHash]
+          );
+          await client.query('COMMIT');
+          return { reservationId, isFree: false, resumed: false };
+        }
         const registeredUser = await client.query(
           'SELECT id FROM users WHERE signup_ip_hash = $1 LIMIT 1',
           [ipHash]
@@ -76,12 +119,12 @@ async function reserveEbook(user, ipHash) {
       }
 
       const hasPaidAccess = current.has_lifetime_access || (current.paid_until && new Date(current.paid_until) > new Date());
-      if (!current.is_admin && !hasPaidAccess && current.free_ebook_used) {
+      if (!current.is_admin && !isAdminIp && !hasPaidAccess && current.free_ebook_used) {
         await client.query('ROLLBACK');
         throw Object.assign(new Error('Seu e-book grátis já foi usado. Escolha um plano para continuar.'), { status: 402 });
       }
 
-      const isFree = !current.is_admin && !hasPaidAccess;
+      const isFree = !current.is_admin && !isAdminIp && !hasPaidAccess;
       if (isFree) await client.query('UPDATE users SET free_ebook_used = TRUE WHERE id = $1', [current.id]);
       const reservationId = crypto.randomUUID();
       await client.query(
@@ -99,27 +142,31 @@ async function reserveEbook(user, ipHash) {
   } catch (error) {
     if (databaseUnavailableError(error)) {
       console.warn('[reservation] Banco indisponível; usando fallback em memória:', error.message);
-      return reserveEbookMemory(user, ipHash);
+      return reserveEbookMemory(user, ipHash, isAdminIp);
     }
     throw error;
   }
 }
 
-function reserveEbookMemory(user, ipHash) {
+function reserveEbookMemory(user, ipHash, isAdminIp = false) {
   if (!user) {
     if (!ipHash) throw Object.assign(new Error('Não foi possível identificar seu endereço de conexão.'), { status: 400 });
-    const existing = readMemoryReservations().find((reservation) => reservation.ip_hash === ipHash && reservation.is_free && reservation.status === 'pending');
-    if (existing) return { reservationId: existing.id, isFree: true, resumed: true };
+    const ipReservations = readMemoryReservations().filter((reservation) => reservation.ip_hash === ipHash);
+    const existing = ipReservations.find((reservation) => reservation.is_free === !isAdminIp && reservation.status === 'pending');
+    if (existing) return { reservationId: existing.id, isFree: !isAdminIp, resumed: true };
+    if (!isAdminIp && ipReservations.some((reservation) => reservation.is_free && reservation.status === 'completed')) {
+      throw Object.assign(new Error('O e-book gratuito deste endereço já foi usado. Informe seu e-mail para ver os planos.'), { status: 402 });
+    }
     const reservation = {
       id: crypto.randomUUID(),
       user_id: null,
       ip_hash: ipHash,
-      is_free: true,
+      is_free: !isAdminIp,
       status: 'pending',
       created_at: new Date().toISOString(),
     };
     getMemoryStore().reservations.set(reservation.id, reservation);
-    return { reservationId: reservation.id, isFree: true, resumed: false };
+    return { reservationId: reservation.id, isFree: !isAdminIp, resumed: false };
   }
 
   const pending = memoryReservationFor(user, null);
@@ -128,7 +175,7 @@ function reserveEbookMemory(user, ipHash) {
     id: crypto.randomUUID(),
     user_id: user.id,
     ip_hash: null,
-    is_free: !user.is_admin && !user.has_lifetime_access && !user.paid_until,
+    is_free: !user.is_admin && !isAdminIp && !user.has_lifetime_access && !user.paid_until,
     status: 'pending',
     created_at: new Date().toISOString(),
   };

@@ -238,8 +238,11 @@
     <div class="plans-heading">
       <p class="eyebrow">Comece sem compromisso</p>
       <h2>Experimente com um e-book. Continue no seu ritmo.</h2>
-      <p>Um e-book gratuito por endereço de internet. Depois, informe seu e-mail para assinar e continuar criando.</p>
+      <p>Um e-book gratuito por endereço de internet. Os pagamentos são feitos diretamente no checkout seguro do Asaas.</p>
     </div>
+    <label for="checkoutCoupon">Cupom (opcional)</label>
+    <input id="checkoutCoupon" autocomplete="off" placeholder="Digite o código que recebeu">
+    <p id="checkoutMessage" role="status" aria-live="polite"></p>
     <div class="plans-grid">
       <article class="plan-card">
         <h3>Primeiro e-book</h3><p>Para transformar sua primeira ideia em um livro.</p>
@@ -260,21 +263,15 @@
         <button type="button" class="secondary" onclick="irParaPlano('lifetime')">Escolher vitalício</button>
       </article>
     </div>
-    <p class="coupon-note">Cupom de 30% de desconto: <strong>chequetto30</strong></p>
   </section>
 
   <section id="paywall" class="paywall" hidden>
     <h2>Seu e-book gratuito já foi usado</h2>
-    <p>Escolha como quer continuar. Use o cupom <strong>chequetto30</strong> para receber 30% de desconto.</p>
-    <label for="cpfCnpj">CPF ou CNPJ para a cobrança</label>
-    <input id="cpfCnpj" inputmode="numeric" autocomplete="off" placeholder="Somente números">
-    <label for="couponCode">Cupom de desconto</label>
-    <input id="couponCode" autocomplete="off" placeholder="chequetto30">
+    <p>Escolha um plano. O Asaas solicitará os dados de pagamento no checkout.</p>
     <div class="plan-actions">
-      <button type="button" onclick="comprarPlano('monthly')">Plano mensal: R$ 99,00</button>
-      <button type="button" class="secondary" onclick="comprarPlano('lifetime')">Plano vitalício: R$ 299,00</button>
+      <button type="button" onclick="irParaPlano('monthly')">Plano mensal: R$ 99,00</button>
+      <button type="button" class="secondary" onclick="irParaPlano('lifetime')">Plano vitalício: R$ 299,00</button>
     </div>
-    <p id="paymentMessage" role="status" aria-live="polite"></p>
   </section>
 
   <section id="adminPanel" hidden>
@@ -480,45 +477,25 @@ function irParaCadastro() {
   document.getElementById('bookTitle').focus({ preventScroll: true });
 }
 
-function irParaPlano(plan) {
-  if (!currentUser) {
-    document.getElementById('loginEmail').scrollIntoView({ behavior: 'smooth', block: 'center' });
-    document.getElementById('loginEmail').focus({ preventScroll: true });
-    document.getElementById('authMessage').textContent = 'Informe seu e-mail para receber o código e continuar para o pagamento.';
-    return;
-  }
-
-  if (!currentUser.free_ebook_used) {
-    document.getElementById('accountStatus').textContent = 'Comece pelo seu e-book gratuito. Os planos ficam disponíveis depois.';
-    document.getElementById('generatorPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
-    return;
-  }
-
-  document.getElementById('paywall').hidden = false;
-  document.getElementById('couponCode').value = 'chequetto30';
-  document.getElementById('paymentMessage').textContent = plan === 'monthly'
-    ? 'Plano mensal selecionado. Confira seus dados para continuar.'
-    : 'Plano vitalício selecionado. Confira seus dados para continuar.';
-  document.getElementById('paywall').scrollIntoView({ behavior: 'smooth', block: 'center' });
-}
-
-async function comprarPlano(plan) {
-  const message = document.getElementById('paymentMessage');
-  const cpfCnpj = document.getElementById('cpfCnpj').value.trim();
-  const coupon = document.getElementById('couponCode').value.trim();
-  message.textContent = 'Criando cobrança...';
+async function irParaPlano(plan) {
+  const message = document.getElementById('checkoutMessage');
+  const buttons = [...document.querySelectorAll('#planos button, #paywall button')];
+  buttons.forEach((button) => { button.disabled = true; });
+  message.textContent = 'Abrindo checkout seguro do Asaas...';
   try {
-    const response = await apiFetch('/api/create-payment', {
+    const response = await apiFetch('/api/create-checkout', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ plan, cpfCnpj, coupon }),
+      body: JSON.stringify({ plan, coupon: document.getElementById('checkoutCoupon').value.trim() }),
     });
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error || 'Não foi possível criar a cobrança.');
-    if (!data.url) throw new Error('O Asaas não retornou o link de pagamento.');
+    if (!response.ok) throw new Error(data.error || 'Não foi possível criar o checkout.');
+    if (!data.url) throw new Error('O Asaas não retornou o link do checkout.');
     window.location.assign(data.url);
   } catch (error) {
-    message.textContent = error.message;
+    message.textContent = error.message || 'Não foi possível abrir o Asaas. Tente novamente.';
+  } finally {
+    buttons.forEach((button) => { button.disabled = false; });
   }
 }
 
