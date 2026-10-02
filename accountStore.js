@@ -14,6 +14,9 @@ const pool = process.env.DATABASE_URL
   ? new Pool({
       connectionString: process.env.DATABASE_URL,
       ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
+      connectionTimeoutMillis: 5000,
+      query_timeout: 10000,
+      statement_timeout: 10000,
     })
   : null;
 

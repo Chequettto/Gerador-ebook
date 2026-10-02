@@ -549,7 +549,10 @@ async function testeRapido() {
   statusEl.textContent = '⏳ Testando conexão com o servidor (pode demorar até 1 minuto se ele estava "dormindo")...';
 
   try {
-    const reservationResponse = await apiFetch(base + '/api/ebooks/reserve', { method: 'POST' });
+    const reservationResponse = await apiFetch(base + '/api/ebooks/reserve', {
+      method: 'POST',
+      signal: AbortSignal.timeout(15000),
+    });
     const reservation = await reservationResponse.json();
     if (!reservationResponse.ok) {
       if (reservationResponse.status === 402) {
