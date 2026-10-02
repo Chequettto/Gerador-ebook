@@ -151,7 +151,7 @@ async function findReservation(userId, reservationId, ipHash) {
         )`,
       [reservationId, userId || null, ipHash || null]
     );
-    return result.rows[0] || null;
+    return result.rows[0] || findReservationMemory(userId, reservationId, ipHash);
   } catch (error) {
     if (databaseUnavailableError(error)) {
       console.warn('[reservation] Banco indisponível em findReservation; usando fallback em memória:', error.message);
@@ -185,7 +185,7 @@ async function completeReservation(userId, reservationId, ipHash) {
         RETURNING id`,
       [reservationId, userId || null, ipHash || null]
     );
-    return result.rowCount > 0;
+    return result.rowCount > 0 || completeReservationMemory(userId, reservationId, ipHash);
   } catch (error) {
     if (databaseUnavailableError(error)) {
       console.warn('[reservation] Banco indisponível em completeReservation; usando fallback em memória:', error.message);
