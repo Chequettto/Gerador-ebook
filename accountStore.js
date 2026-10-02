@@ -20,6 +20,40 @@ function hasDatabase() {
   return Boolean(pool);
 }
 
+function databaseUnavailableError(error) {
+  const seen = new Set();
+  function walk(node) {
+    if (!node || seen.has(node)) return '';
+    seen.add(node);
+
+    const message = String(node && node.message ? node.message : node || '');
+    if (/DATABASE_URL|ECONNREFUSED|ENOTFOUND|connection.*failed|timeout|pg_|Client has already been ended|connect/i.test(message)) {
+      return message;
+    }
+
+    if (Array.isArray(node.errors)) {
+      for (const item of node.errors) {
+        const found = walk(item);
+        if (found) return found;
+      }
+    }
+
+    if (node.cause) {
+      const found = walk(node.cause);
+      if (found) return found;
+    }
+
+    if (node.parent) {
+      const found = walk(node.parent);
+      if (found) return found;
+    }
+
+    return '';
+  }
+
+  return Boolean(walk(error));
+}
+
 function getMemoryStore() {
   return memoryStore;
 }
@@ -93,4 +127,4 @@ async function initializeStore() {
   `);
 }
 
-module.exports = { getPool, getMemoryStore, hasDatabase, initializeStore };
+module.exports = { databaseUnavailableError, getPool, getMemoryStore, hasDatabase, initializeStore };

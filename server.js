@@ -137,11 +137,6 @@ async function loadOptionalUser(req, res, next) {
 }
 
 async function requireEbookReservation(req, res, next) {
-  if (!hasDatabase()) {
-    req.ebookReservation = { id: String(req.body && req.body.reservationId || 'local-memory-reservation'), status: 'pending' };
-    return next();
-  }
-
   try {
     const reservation = await findReservation(
       req.user && req.user.id,
@@ -149,11 +144,19 @@ async function requireEbookReservation(req, res, next) {
       digestSignupIp(req.ip)
     );
     if (!reservation || reservation.status !== 'pending') {
+      if (!hasDatabase()) {
+        req.ebookReservation = { id: String(req.body && req.body.reservationId || 'local-memory-reservation'), status: 'pending' };
+        return next();
+      }
       return res.status(403).json({ error: 'Inicie ou retome um e-book antes de gerar conteúdo.' });
     }
     req.ebookReservation = reservation;
     return next();
   } catch (error) {
+    if (!hasDatabase()) {
+      req.ebookReservation = { id: String(req.body && req.body.reservationId || 'local-memory-reservation'), status: 'pending' };
+      return next();
+    }
     return res.status(503).json({ error: error.message || 'Não foi possível verificar sua cota.' });
   }
 }
