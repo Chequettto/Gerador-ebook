@@ -67,13 +67,15 @@ function drawLocalVectorCover(page, input, body, bold, width, height, margin, ma
     y -= 38;
   }
   page.drawText(sanitize(input.niche || 'E-book'), { x: margin, y: height * 0.28, size: 13, font: body, color: rgb(0.09, 0.23, 0.21), maxWidth });
-  page.drawText(sanitize(input.author || 'Autor'), { x: margin, y: 58, size: 14, font: bold, color: rgb(1, 0.98, 0.94), maxWidth });
+  if (input.author) {
+    page.drawText(sanitize(input.author), { x: margin, y: 58, size: 14, font: bold, color: rgb(1, 0.98, 0.94), maxWidth });
+  }
 }
 
 async function buildPdf(input) {
   const pdf = await PDFDocument.create();
   pdf.setTitle(input.title);
-  pdf.setAuthor(input.author);
+  if (input.author) pdf.setAuthor(input.author);
   pdf.setSubject(input.subtitle || '');
   pdf.setCreator('Gerador de E-book');
 
@@ -126,20 +128,15 @@ async function buildPdf(input) {
       lineHeight: 20,
     });
   }
-  titlePage.drawText(sanitize(input.author), {
-    x: MARGIN,
-    y: 120,
-    size: 13,
-    font: bold,
-    color: rgb(0.2, 0.2, 0.25),
-  });
-  titlePage.drawText('Gerado com o gerador de e-books', {
-    x: MARGIN,
-    y: 96,
-    size: 10,
-    font: body,
-    color: rgb(0.55, 0.55, 0.6),
-  });
+  if (input.author) {
+    titlePage.drawText(sanitize(input.author), {
+      x: MARGIN,
+      y: 120,
+      size: 13,
+      font: bold,
+      color: rgb(0.2, 0.2, 0.25),
+    });
+  }
 
   // Capítulos
   for (const chapter of input.chapters) {
@@ -201,6 +198,7 @@ function buildEpub(input) {
 
   const hasCover = !!input.coverBytes;
   const coverExt = input.coverMime === 'image/jpeg' ? 'jpg' : input.coverMime === 'image/svg+xml' ? 'svg' : 'png';
+  const creatorMetadata = input.author ? `<dc:creator>${escapeHtml(input.author)}</dc:creator>` : '';
   if (input.coverBytes) files[`OEBPS/cover.${coverExt}`] = input.coverBytes;
 
   files['OEBPS/style.css'] = strToU8(
@@ -258,7 +256,7 @@ h1{font-size:1.6em;margin:0 0 .8em}p{margin:0 0 1em;text-align:justify}`
 <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
 <dc:identifier id="bookid">${uid}</dc:identifier>
 <dc:title>${escapeHtml(input.title)}</dc:title>
-<dc:creator>${escapeHtml(input.author)}</dc:creator>
+${creatorMetadata}
 <dc:language>pt-BR</dc:language>
 ${input.subtitle ? `<dc:description>${escapeHtml(input.subtitle)}</dc:description>` : ''}
 <meta property="dcterms:modified">${new Date().toISOString().replace(/\.\d+Z$/, 'Z')}</meta>

@@ -39,9 +39,10 @@ const AI_CLICHES = [
 
 const STATIC_PROMPTS = {
   architect: [
-    'Você é um autor especialista. Desenvolva um rascunho denso e útil a partir do esqueleto local e das referências fornecidas.',
-    'Respeite o capítulo, o público e o tom. Evite repetição, afirmações sem apoio e estatísticas inventadas.',
-    'Use referências com suas próprias palavras. Preserve continuidade e entregue somente o texto do bloco.',
+    'Você é um autor e editor experiente de não ficção. Escreva para pessoas reais, com clareza, exemplos concretos e voz natural, sem soar como manual genérico.',
+    'Cada bloco deve avançar o capítulo. Não repita definições, conselhos, exemplos ou analogias já presentes no contexto; não reutilize uma mesma analogia em capítulos diferentes.',
+    'Use as referências apenas como apoio factual e escreva com suas próprias palavras. Nunca invente autores, datas, títulos, citações, estatísticas ou fontes. Só atribua uma informação a uma fonte se esses dados estiverem explicitamente nas referências fornecidas.',
+    'Não exponha instruções, resumos internos, notas de pesquisa nem fale sobre o processo de geração. Preserve continuidade e entregue somente o texto do bloco.',
   ].join('\n'),
   outline: [
     'Você é um editor-chefe que organiza e-books em uma progressão didática clara.',
@@ -49,8 +50,10 @@ const STATIC_PROMPTS = {
     'Não invente estatísticas ou promessas de resultado.',
   ].join('\n'),
   polish: [
-    'Você é um editor executivo. Reescreva o texto recebido com fluidez natural, clareza e ritmo humano.',
-    'Preserve fatos, exemplos e recomendações; não invente conteúdo, não aumente o escopo e não resuma.',
+    'Você é um editor de não ficção. Revise o texto para que soe natural, específico para o tema e escrito para um leitor real, sem fórmulas repetitivas de IA.',
+    'Preserve fatos corretos e recomendações úteis; elimine redundâncias, frases genéricas, repetições de ideias e referências a notas ou ao processo de geração.',
+    'Não acrescente fatos, autores, datas, citações, estatísticas ou fontes. Não transforme notas de pesquisa em afirmações atribuídas sem dados bibliográficos explícitos.',
+    'Não resuma nem retire orientações importantes. Não repita a analogia ou o exemplo central já usado no texto recebido.',
     `Evite clichês como: ${AI_CLICHES.join(', ')}.`,
     'Entregue apenas o texto final, sem título, markdown ou explicações.',
   ].join('\n'),
@@ -318,7 +321,7 @@ async function callCloudflareOnce(apiToken, prompt, model = models.cloudflare.st
 async function generateCoverImageWithGemini({ title, subtitle, author, niche, stylePreference }) {
   const pool = pools.gemini;
   if (!pool || pool.length === 0) throw new Error('Nenhuma chave Gemini disponível para a capa.');
-  const prompt = `Crie uma capa editorial profissional para um e-book sobre "${niche}". Inclua exatamente o título "${title}"${subtitle ? `, o subtítulo "${subtitle}"` : ''} e o autor "${author || 'Autor'}" como texto legível na imagem. Estilo: ${stylePreference || 'editorial moderno'}, formato retrato 2:3.`;
+  const prompt = `Crie uma capa editorial profissional para um e-book sobre "${niche}". Inclua exatamente o título "${title}"${subtitle ? `, o subtítulo "${subtitle}"` : ''}${author ? ` e o nome do autor "${author}"` : ''} como texto legível na imagem. Estilo: ${stylePreference || 'editorial moderno'}, formato retrato 2:3.`;
   let lastError = null;
   const startIndex = nextStartIndex('gemini');
 

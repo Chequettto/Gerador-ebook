@@ -173,25 +173,15 @@ function buildLocalOutline({ bookTitle, niche, targetAudience, numChapters, lang
   };
 }
 
-function buildLocalDraft({ bookTitle, chapterTitle, blockNumber, niche, targetAudience, tone, recentContext, bookDescription, researchContext, bookStateSummary }) {
+function buildLocalDraft({ bookTitle, chapterTitle, blockNumber, niche, targetAudience }) {
   const guideIndex = (Math.max(1, Number(blockNumber) || 1) - 1) % BLOCK_GUIDES.length;
   const guide = BLOCK_GUIDES[guideIndex];
-  const context = normalizePromptText(recentContext);
-  const bookState = compressReferenceText(bookStateSummary, `${bookTitle} ${chapterTitle}`, 900);
-  const rawNotes = normalizePromptText(researchContext);
-  const notes = compressReferenceText(researchContext, `${niche} ${chapterTitle}`, 1200);
-  const savedEstimate = Math.max(0, Math.ceil(rawNotes.length / 4) - Math.ceil(notes.length / 4));
-  console.log(`[economia-token] Referências: estimativa de ${Math.ceil(rawNotes.length / 4)} para ${Math.ceil(notes.length / 4)} tokens; economia estimada ${savedEstimate}.`);
   const paragraphs = [
-    `Neste bloco do livro "${bookTitle}", o capítulo "${chapterTitle}" trata de ${niche} com foco em ${targetAudience}. ${guide}`,
-    `Para aplicar a ideia, o leitor pode começar observando a própria situação, anotando os fatores que mais influenciam o problema e escolhendo uma prioridade realista. Em seguida, vale transformar essa prioridade em uma ação clara, definir quando ela será feita e registrar o que aconteceu. Esse processo permite aprender com a prática sem depender de uma solução única para todas as pessoas.`,
+    `Em "${chapterTitle}", o foco é ${niche} para ${targetAudience}. ${guide}`,
+    'Comece observando a situação concreta do leitor: quais fatores influenciam essa decisão, quais recursos estão disponíveis e que informação ainda falta? Separar esses pontos ajuda a escolher uma prioridade realista, em vez de seguir uma receita que talvez não se aplique ao seu contexto.',
     BLOCK_APPLICATIONS[guideIndex],
-    'Para acompanhar o processo, mantenha um registro simples com a data, a ação realizada, o que funcionou e o que precisa mudar. Revise esse registro em um intervalo adequado ao tema e procure padrões em vez de tirar conclusões por um único resultado. Quando houver impacto importante em saúde, segurança ou dinheiro, confirme decisões com uma fonte qualificada antes de agir.',
-    `A estratégia deve respeitar o contexto de cada leitor. Antes de avançar, é importante verificar recursos disponíveis, limitações e possíveis consequências. Quando houver dúvida, uma mudança pequena e reversível costuma ser mais prudente do que uma decisão difícil de desfazer. O resultado deve ser acompanhado por sinais concretos, não apenas pela impressão do momento.`,
-    bookState ? `Resumo executivo local dos capítulos anteriores: ${bookState}` : '',
-    context ? `Para manter continuidade com o trecho anterior, considere: ${context}` : `O tom deste trecho deve permanecer ${tone || 'claro e acolhedor'}. ${bookDescription ? `A abordagem segue a proposta do livro: ${bookDescription}` : ''}`,
+    'Ao testar uma estratégia, registre a ação, o prazo e um sinal concreto de progresso. Revise o resultado antes de ampliar a mudança. Se houver risco financeiro, jurídico ou de saúde, procure orientação qualificada; uma alternativa reversível é preferível quando as consequências ainda não estão claras.',
   ];
-  if (notes) paragraphs.push(`Notas factuais selecionadas para revisão e paráfrase: ${notes}`);
   return paragraphs.join('\n\n');
 }
 

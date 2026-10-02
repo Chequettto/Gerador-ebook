@@ -9,7 +9,7 @@ const crypto = require('crypto');
 
 const { generateBlock, generateOutline, refineOutline, generateCoverImageWithGemini, pools } = require('./aiService');
 const { buildPdf, buildEpub } = require('./bookBuildService');
-const { generateLocalCoverSvg } = require('./coverService');
+const { generateCommonsCover, generateLocalCoverSvg } = require('./coverService');
 const { PLANS, findOrCreateCustomer, createLifetimeCharge, createMonthlySubscription, getPaymentStatus } = require('./asaasService');
 const researchEngine = require('./research/researchEngine');
 const { compressReferenceText } = require('./promptCompression');
@@ -383,7 +383,7 @@ app.post('/api/refine-outline', loadOptionalUser, requireEbookReservation, async
 
 // ---------------------------------------------------------------------------
 // POST /api/generate-cover
-// Gera a capa em SVG local, sem consumir chamadas ou créditos de IA.
+// Compõe uma capa com imagem livre do Wikimedia Commons; usa IA e SVG local como reservas.
 // Body: { title, subtitle?, author?, niche, stylePreference? }
 // ---------------------------------------------------------------------------
 app.post('/api/generate-cover', loadOptionalUser, requireEbookReservation, async (req, res) => {
@@ -398,28 +398,31 @@ app.post('/api/generate-cover', loadOptionalUser, requireEbookReservation, async
 
   try {
     let image;
-    let local = false;
     try {
-      image = await generateCoverImageWithGemini({
-        title,
-        subtitle: subtitle || '',
-        author: author || '',
-        niche,
-        stylePreference,
-      });
-    } catch (error) {
-      console.error('Gemini indisponível para a capa; usando desenho local:', error.message);
-      image = {
-        bytes: generateLocalCoverSvg({ title, subtitle: subtitle || '', author: author || '', niche }),
-        mimeType: 'image/svg+xml',
-      };
-      local = true;
+      image = await generateCommonsCover({ title, subtitle: subtitle || '', author: author || '', niche });
+    } catch (commonsError) {
+      console.warn('Imagem livre indisponível para a capa; tentando Gemini:', commonsError.message);
+      try {
+        image = await generateCoverImageWithGemini({ title, subtitle: subtitle || '', author: author || '', niche, stylePreference });
+        image.source = 'Gemini';
+      } catch (geminiError) {
+        console.error('Gemini indisponível para a capa; usando SVG local:', geminiError.message);
+        image = {
+          bytes: generateLocalCoverSvg({ title, subtitle: subtitle || '', author: author || '', niche }),
+          mimeType: 'image/svg+xml',
+          source: 'local',
+        };
+      }
     }
     return res.json({
       success: true,
       imageBase64: image.bytes.toString('base64'),
       mimeType: image.mimeType,
-      local,
+      local: image.source === 'local',
+      source: image.source,
+      sourceTitle: image.sourceTitle || null,
+      sourceUrl: image.sourceUrl || null,
+      license: image.license || null,
       title,
       niche,
     });
@@ -446,11 +449,12 @@ app.post('/api/generate-cover', loadOptionalUser, requireEbookReservation, async
 // }
 // ---------------------------------------------------------------------------
 app.post('/api/build-book', loadOptionalUser, requireEbookReservation, async (req, res) => {
-  const { title, subtitle, author, niche, chapters, coverBase64, coverMime: coverMimeIn } = req.body || {};
+  const { title, subtitle, author: authorInput, niche, chapters, coverBase64, coverMime: coverMimeIn } = req.body || {};
+  const author = typeof authorInput === 'string' ? authorInput.trim() : '';
 
-  if (!title || !author || !Array.isArray(chapters) || chapters.length === 0) {
+  if (!title || !Array.isArray(chapters) || chapters.length === 0) {
     return res.status(400).json({
-      error: 'Campos obrigatórios ausentes: title, author e chapters (lista não vazia).',
+      error: 'Campos obrigatórios ausentes: title e chapters (lista não vazia).',
     });
   }
 

@@ -291,7 +291,7 @@
     <input id="bookTitle" placeholder="ex: Domine suas Finanças" value="Domine suas Finanças" />
 
     <label for="author">Nome do autor</label>
-    <input id="author" placeholder="ex: Seu nome" value="Autor" />
+    <input id="author" placeholder="ex: Seu nome" value="" />
 
     <label for="niche">Nicho / assunto do livro</label>
     <input id="niche" placeholder="ex: finanças pessoais" value="finanças pessoais" />
@@ -654,7 +654,7 @@ function localCoverBase64(title, subtitle, author, niche) {
   if (currentLine) titleLines.push(currentLine);
   const titleMarkup = titleLines.slice(0, 5).map((line, index) => `<tspan x="76" dy="${index === 0 ? 0 : 64}">${escapeXml(line)}</tspan>`).join('');
   const subtitleY = 440 + Math.min(titleLines.length, 5) * 64;
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="800" height="1200" viewBox="0 0 800 1200"><rect width="800" height="1200" fill="#173b37"/><path d="M0 0h800v300C500 420 300 350 0 500Z" fill="#22534b"/><circle cx="660" cy="230" r="120" fill="#d5ec83"/><path d="M0 920c260-120 510-30 800-160v440H0Z" fill="#c9573e"/><text x="76" y="120" fill="#d5ec83" font-family="sans-serif" font-size="22">GUIA PRÁTICO</text><text x="76" y="185" fill="#e5eee7" font-family="sans-serif" font-size="24">${escapeXml(niche)}</text><text x="76" y="430" fill="#fffaf0" font-family="Georgia,serif" font-size="58" font-weight="bold">${titleMarkup}</text><text x="76" y="${subtitleY}" fill="#e5eee7" font-family="sans-serif" font-size="25">${escapeXml(subtitle)}</text><text x="76" y="1090" fill="#fffaf0" font-family="sans-serif" font-size="25">${escapeXml(author || 'Autor')}</text></svg>`;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="800" height="1200" viewBox="0 0 800 1200"><rect width="800" height="1200" fill="#173b37"/><path d="M0 0h800v300C500 420 300 350 0 500Z" fill="#22534b"/><circle cx="660" cy="230" r="120" fill="#d5ec83"/><path d="M0 920c260-120 510-30 800-160v440H0Z" fill="#c9573e"/><text x="76" y="120" fill="#d5ec83" font-family="sans-serif" font-size="22">GUIA PRÁTICO</text><text x="76" y="185" fill="#e5eee7" font-family="sans-serif" font-size="24">${escapeXml(niche)}</text><text x="76" y="430" fill="#fffaf0" font-family="Georgia,serif" font-size="58" font-weight="bold">${titleMarkup}</text><text x="76" y="${subtitleY}" fill="#e5eee7" font-family="sans-serif" font-size="25">${escapeXml(subtitle)}</text>${author ? `<text x="76" y="1090" fill="#fffaf0" font-family="sans-serif" font-size="25">${escapeXml(author)}</text>` : ''}</svg>`;
   return btoa(unescape(encodeURIComponent(svg)));
 }
 
@@ -668,7 +668,7 @@ async function gerarBloco(base, params) {
   return data.text;
 }
 
-const PROGRESS_KEY = 'gerador_progress_v1';
+const PROGRESS_KEY = 'gerador_progress_v2';
 
 function progressSignature(p) {
   return [p.bookTitle, p.niche, p.audience, p.tone, p.numChapters, p.blocksPerChapter, p.language, p.coverStyle].join('|');
@@ -706,7 +706,7 @@ async function gerarLivroCompleto() {
 
   if (!base) { errbox.textContent = 'Cole o endereço do site primeiro.'; return; }
   const bookTitle = document.getElementById('bookTitle').value.trim();
-  const author = document.getElementById('author').value.trim() || 'Autor';
+  const author = document.getElementById('author').value.trim();
   const niche = document.getElementById('niche').value.trim();
   const audience = document.getElementById('audience').value.trim();
   const language = document.getElementById('language').value;
@@ -869,7 +869,10 @@ async function gerarLivroCompleto() {
           coverBase64 = data.imageBase64;
           coverMime = data.mimeType || 'image/png';
           coverPreview.src = 'data:' + coverMime + ';base64,' + coverBase64;
-          setStep('cover', data.local ? 'pronta localmente, sem chamada de IA ✅' : 'pronta ✅', 'done');
+          const coverStatus = data.source === 'Wikimedia Commons'
+            ? 'imagem livre licenciada, composição profissional pronta ✅'
+            : data.local ? 'pronta localmente ✅' : 'pronta ✅';
+          setStep('cover', coverStatus, 'done');
           coverPreview.style.display = 'block';
           saved.coverUrl = null;
           saved.coverBase64 = coverBase64;
