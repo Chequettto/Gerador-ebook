@@ -703,9 +703,12 @@ async function gerarLivroCompleto() {
   btn.disabled = true;
   const stepOutline = addStep('outline', 'Montando esqueleto local e preparando pesquisa');
   const stepCover = addStep('cover', 'Gerando capa');
+  setStep('outline', 'iniciando reserva e conferindo acesso...');
+  setStep('cover', 'aguardando o subtítulo do sumário...');
 
   try {
     if (!saved) saved = { signature, chapters: [] };
+    setStep('outline', 'verificando acesso para iniciar o e-book...');
     const reservationResponse = await apiFetch(base + '/api/ebooks/reserve', { method: 'POST' });
     const reservation = await reservationResponse.json();
     if (reservationResponse.status === 402) {
@@ -718,6 +721,7 @@ async function gerarLivroCompleto() {
     }
     saved.reservationId = reservation.reservationId;
     saveProgress(saved);
+    setStep('outline', 'acesso confirmado; montando o sumário...');
     const reservationId = saved.reservationId;
     const isResuming = saved.subtitle !== undefined;
     let subtitle, bookDescription, chapterTitles, localContextByChapter;
@@ -789,7 +793,57 @@ async function gerarLivroCompleto() {
         console.warn('IA de sumário indisponível; mantendo esqueleto local:', outlineError.message);
       }
 
-      // Busca os títulos finais também; resultados repetidos vêm do cache.
+    }
+
+    let coverPromise = null;
+    let coverBase64 = saved.coverBase64 || null;
+    let coverMime = saved.coverMime || null;
+    if (coverBase64) {
+      setStep('cover', 'reaproveitada (retomando) ✅', 'done');
+      coverPreview.src = 'data:' + coverMime + ';base64,' + coverBase64;
+      coverPreview.style.display = 'block';
+    } else {
+      setStep('cover', 'criando capa enquanto termina a pesquisa...', '');
+      coverPromise = (async () => {
+        try {
+          const response = await apiFetch(base + '/api/generate-cover', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reservationId, title: bookTitle, subtitle, author, niche, stylePreference: coverStyle })
+          });
+          const data = await response.json();
+          if (!response.ok || !data.success || !data.imageBase64) throw new Error(data.error || 'O servidor não retornou a capa.');
+          coverBase64 = data.imageBase64;
+          coverMime = data.mimeType || 'image/png';
+          saved.coverBase64 = coverBase64;
+          saved.coverMime = coverMime;
+          saved.coverSource = data.source || null;
+          saved.coverSourceUrl = data.sourceUrl || null;
+          saved.coverLicense = data.license || null;
+          saveProgress(saved);
+          coverPreview.src = 'data:' + coverMime + ';base64,' + coverBase64;
+          coverPreview.style.display = 'block';
+          const coverStatus = data.source === 'Wikimedia Commons'
+            ? 'imagem livre licenciada, composição profissional pronta ✅'
+            : data.local ? 'pronta localmente ✅' : 'pronta ✅';
+          setStep('cover', coverStatus, 'done');
+        } catch (error) {
+          console.warn('Servidor de capas indisponível; criando capa local no navegador:', error.message);
+          coverBase64 = localCoverBase64(bookTitle, subtitle, author, niche);
+          coverMime = 'image/svg+xml';
+          saved.coverBase64 = coverBase64;
+          saved.coverMime = coverMime;
+          saveProgress(saved);
+          coverPreview.src = 'data:' + coverMime + ';base64,' + coverBase64;
+          coverPreview.style.display = 'block';
+          setStep('cover', 'pronta com modelo local ✅', 'done');
+        }
+        return { coverBase64, coverMime };
+      })();
+    }
+
+    if (!isResuming) {
+      // Busca os títulos finais enquanto a capa é composta.
+      setStep('outline', 'sumário pronto; confirmando fontes finais...', '');
       try {
         const finalResearchRes = await apiFetch(base + '/api/prepare-book', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -829,46 +883,7 @@ async function gerarLivroCompleto() {
 
     // 1) Gemini tenta a capa; servidor e navegador têm SVG local de reserva.
     const coverUrl = null;
-    let coverBase64 = saved.coverBase64 || null;
-    let coverMime = saved.coverMime || null;
-    if (coverBase64) {
-      setStep('cover', 'reaproveitada (retomando) ✅', 'done');
-      coverPreview.src = 'data:' + coverMime + ';base64,' + coverBase64;
-      coverPreview.style.display = 'block';
-    } else {
-      try {
-        const res = await apiFetch(base + '/api/generate-cover', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ reservationId, title: bookTitle, subtitle, author, niche, stylePreference: coverStyle })
-        });
-        const data = await res.json();
-        if (res.ok && data.success && data.imageBase64) {
-          coverBase64 = data.imageBase64;
-          coverMime = data.mimeType || 'image/png';
-          coverPreview.src = 'data:' + coverMime + ';base64,' + coverBase64;
-          const coverStatus = data.source === 'Wikimedia Commons'
-            ? 'imagem livre licenciada, composição profissional pronta ✅'
-            : data.local ? 'pronta localmente ✅' : 'pronta ✅';
-          setStep('cover', coverStatus, 'done');
-          coverPreview.style.display = 'block';
-          saved.coverUrl = null;
-          saved.coverBase64 = coverBase64;
-          saved.coverMime = coverMime;
-          saveProgress(saved);
-        } else {
-          throw new Error(data.error || 'O Gemini não conseguiu gerar a capa.');
-        }
-      } catch (e) {
-        coverBase64 = localCoverBase64(bookTitle, subtitle, author, niche);
-        coverMime = 'image/svg+xml';
-        coverPreview.src = 'data:' + coverMime + ';base64,' + coverBase64;
-        coverPreview.style.display = 'block';
-        saved.coverBase64 = coverBase64;
-        saved.coverMime = coverMime;
-        saveProgress(saved);
-        setStep('cover', 'Gemini indisponível; capa local pronta ✅', 'done');
-      }
-    }
+    if (coverPromise) await coverPromise;
 
     // 2) Capítulos — pula os que já estiverem prontos de uma tentativa anterior
     const chapters = saved.chapters || [];
