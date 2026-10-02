@@ -10,7 +10,10 @@
  * ---------------------------------------------------------------------------
  */
 
-const fetch = require('node-fetch');
+const fetch = globalThis.fetch;
+if (typeof fetch !== 'function') {
+  throw new Error('O Research Engine exige o fetch nativo do Node.js 18 ou superior.');
+}
 
 const DEFAULT_TIMEOUT_MS = 8000;
 const USER_AGENT = 'GeradorEbookResearchEngine/1.0 (uso educacional; contato via operador do sistema)';

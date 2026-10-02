@@ -53,6 +53,23 @@ function wrap(text, font, size, maxWidth) {
   return lines;
 }
 
+function drawLocalVectorCover(page, input, body, bold, width, height, margin, maxWidth) {
+  page.drawRectangle({ x: 0, y: 0, width, height, color: rgb(0.09, 0.23, 0.21) });
+  page.drawRectangle({ x: 0, y: height * 0.72, width, height: height * 0.28, color: rgb(0.13, 0.33, 0.29) });
+  page.drawCircle({ x: width - 110, y: height - 150, size: 72, color: rgb(0.84, 0.93, 0.51), opacity: 0.92 });
+  page.drawRectangle({ x: 0, y: 0, width, height: height * 0.22, color: rgb(0.79, 0.34, 0.24) });
+  page.drawText('GUIA PRATICO', { x: margin, y: height - 82, size: 13, font: bold, color: rgb(0.84, 0.93, 0.51) });
+  page.drawText(sanitize(input.subtitle || ''), { x: margin, y: height - 145, size: 14, font: body, color: rgb(0.85, 0.89, 0.85), maxWidth });
+  const titleLines = wrap(sanitize(input.title), bold, 27, maxWidth).filter(Boolean).slice(0, 5);
+  let y = height - 320;
+  for (const line of titleLines) {
+    page.drawText(line, { x: margin, y, size: 27, font: bold, color: rgb(1, 0.98, 0.94), maxWidth });
+    y -= 38;
+  }
+  page.drawText(sanitize(input.niche || 'E-book'), { x: margin, y: height * 0.28, size: 13, font: body, color: rgb(0.09, 0.23, 0.21), maxWidth });
+  page.drawText(sanitize(input.author || 'Autor'), { x: margin, y: 58, size: 14, font: bold, color: rgb(1, 0.98, 0.94), maxWidth });
+}
+
 async function buildPdf(input) {
   const pdf = await PDFDocument.create();
   pdf.setTitle(input.title);
@@ -71,7 +88,9 @@ async function buildPdf(input) {
   // Capa
   if (input.coverBytes) {
     const page = pdf.addPage([W, H]);
-    try {
+    if (input.coverMime === 'image/svg+xml') {
+      drawLocalVectorCover(page, input, body, bold, W, H, MARGIN, MAX_W);
+    } else try {
       const image =
         input.coverMime === 'image/jpeg'
           ? await pdf.embedJpg(input.coverBytes)
@@ -81,7 +100,7 @@ async function buildPdf(input) {
       const h = image.height * scale;
       page.drawImage(image, { x: (W - w) / 2, y: (H - h) / 2, width: w, height: h });
     } catch {
-      page.drawText(sanitize(input.title), { x: MARGIN, y: H / 2, size: 28, font: bold });
+      drawLocalVectorCover(page, input, body, bold, W, H, MARGIN, MAX_W);
     }
   }
 
@@ -181,7 +200,7 @@ function buildEpub(input) {
   );
 
   const hasCover = !!input.coverBytes;
-  const coverExt = input.coverMime === 'image/jpeg' ? 'jpg' : 'png';
+  const coverExt = input.coverMime === 'image/jpeg' ? 'jpg' : input.coverMime === 'image/svg+xml' ? 'svg' : 'png';
   if (input.coverBytes) files[`OEBPS/cover.${coverExt}`] = input.coverBytes;
 
   files['OEBPS/style.css'] = strToU8(
@@ -218,7 +237,7 @@ h1{font-size:1.6em;margin:0 0 .8em}p{margin:0 0 1em;text-align:justify}`
     `<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>`,
     `<item id="css" href="style.css" media-type="text/css"/>`,
     hasCover
-      ? `<item id="cover-image" href="cover.${coverExt}" media-type="image/${coverExt === 'jpg' ? 'jpeg' : 'png'}" properties="cover-image"/>
+      ? `<item id="cover-image" href="cover.${coverExt}" media-type="${coverExt === 'svg' ? 'image/svg+xml' : `image/${coverExt === 'jpg' ? 'jpeg' : 'png'}`}" properties="cover-image"/>
 <item id="cover" href="cover.xhtml" media-type="application/xhtml+xml"/>`
       : '',
     ...chapterFiles.map((c) => `<item id="${c.id}" href="${c.href}" media-type="application/xhtml+xml"/>`),

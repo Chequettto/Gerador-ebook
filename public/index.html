@@ -640,6 +640,24 @@ function base64ToBlob(base64, mime) {
   return new Blob([arr], { type: mime });
 }
 
+function localCoverBase64(title, subtitle, author, niche) {
+  const escapeXml = (value) => String(value || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+  const titleLines = [];
+  let currentLine = '';
+  for (const word of String(title || '').split(/\s+/).filter(Boolean)) {
+    const candidate = currentLine ? currentLine + ' ' + word : word;
+    if (candidate.length > 20 && currentLine) {
+      titleLines.push(currentLine);
+      currentLine = word;
+    } else currentLine = candidate;
+  }
+  if (currentLine) titleLines.push(currentLine);
+  const titleMarkup = titleLines.slice(0, 5).map((line, index) => `<tspan x="76" dy="${index === 0 ? 0 : 64}">${escapeXml(line)}</tspan>`).join('');
+  const subtitleY = 440 + Math.min(titleLines.length, 5) * 64;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="800" height="1200" viewBox="0 0 800 1200"><rect width="800" height="1200" fill="#173b37"/><path d="M0 0h800v300C500 420 300 350 0 500Z" fill="#22534b"/><circle cx="660" cy="230" r="120" fill="#d5ec83"/><path d="M0 920c260-120 510-30 800-160v440H0Z" fill="#c9573e"/><text x="76" y="120" fill="#d5ec83" font-family="sans-serif" font-size="22">GUIA PRÁTICO</text><text x="76" y="185" fill="#e5eee7" font-family="sans-serif" font-size="24">${escapeXml(niche)}</text><text x="76" y="430" fill="#fffaf0" font-family="Georgia,serif" font-size="58" font-weight="bold">${titleMarkup}</text><text x="76" y="${subtitleY}" fill="#e5eee7" font-family="sans-serif" font-size="25">${escapeXml(subtitle)}</text><text x="76" y="1090" fill="#fffaf0" font-family="sans-serif" font-size="25">${escapeXml(author || 'Autor')}</text></svg>`;
+  return btoa(unescape(encodeURIComponent(svg)));
+}
+
 async function gerarBloco(base, params) {
   const res = await apiFetch(base + '/api/generate-block', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -706,7 +724,7 @@ async function gerarLivroCompleto() {
   let saved = loadProgress(signature);
 
   btn.disabled = true;
-  const stepOutline = addStep('outline', 'Criando sumário e títulos dos capítulos (IA)');
+  const stepOutline = addStep('outline', 'Montando esqueleto local e preparando pesquisa');
   const stepCover = addStep('cover', 'Gerando capa');
 
   try {
@@ -725,31 +743,92 @@ async function gerarLivroCompleto() {
     saveProgress(saved);
     const reservationId = saved.reservationId;
     const isResuming = saved.subtitle !== undefined;
-    let subtitle, bookDescription, chapterTitles;
+    let subtitle, bookDescription, chapterTitles, localContextByChapter;
 
     if (isResuming && saved.subtitle !== undefined) {
-      // Retomando: já tínhamos o sumário, não gasta IA de novo com isso.
+      // Retomando: preserva o sumário e o progresso que já estavam salvos.
       subtitle = saved.subtitle;
       bookDescription = saved.bookDescription;
       chapterTitles = saved.chapterTitles;
+      localContextByChapter = saved.localContextByChapter || {};
       setStep('outline', 'reaproveitado (retomando de onde parou) ✅', 'done');
     } else {
-      // 0) Sumário automático (subtítulo + capítulos), feito pela IA
+      // Fase 0: esqueleto determinístico antes de qualquer chamada de IA.
       const outlineRes = await apiFetch(base + '/api/generate-outline', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reservationId, bookTitle, niche, targetAudience: audience, tone, numChapters, language })
       });
       const outlineData = await outlineRes.json();
-      if (!outlineRes.ok || !outlineData.success) throw new Error(outlineData.details || outlineData.error || 'Falha ao criar o sumário automático.');
-      setStep('outline', 'pronto ✅', 'done');
+      if (!outlineRes.ok || !outlineData.success) throw new Error(outlineData.details || outlineData.error || 'Falha ao montar o esqueleto local.');
 
       subtitle = outlineData.subtitle || '';
       bookDescription = outlineData.description || '';
       chapterTitles = outlineData.chapters;
+      localContextByChapter = outlineData.localContextByChapter || {};
 
-      saved = { signature, reservationId, subtitle, bookDescription, chapterTitles, coverUrl: null, chapters: [] };
+      saved = { signature, reservationId, subtitle, bookDescription, chapterTitles, localContextByChapter, coverUrl: null, chapters: [] };
       saveProgress(saved);
     }
+
+    // Pesquisa pública termina antes de chamar a IA para refinar o sumário.
+    setStep('outline', 'estrutura local pronta; pesquisando fontes gratuitas...', '');
+    try {
+      const prepareRes = await apiFetch(base + '/api/prepare-book', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reservationId, niche, chapters: chapterTitles })
+      });
+      const prepared = await prepareRes.json();
+      if (prepareRes.ok && prepared.success) {
+        saved.researchByChapter = prepared.researchByChapter || {};
+        saveProgress(saved);
+      } else {
+        console.warn('Pesquisa pública indisponível; seguindo sem referências externas:', prepared.error);
+      }
+    } catch (researchError) {
+      console.warn('Pesquisa pública indisponível; seguindo sem referências externas:', researchError.message);
+    }
+
+    if (!isResuming) {
+      setStep('outline', 'fontes consultadas; refinando o sumário com IA...', '');
+      try {
+        const researchContext = Object.values(saved.researchByChapter || {}).filter(Boolean).join('\n').slice(0, 3000);
+        const refineRes = await apiFetch(base + '/api/refine-outline', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reservationId, bookTitle, niche, targetAudience: audience, tone, numChapters, language, chapters: chapterTitles, researchContext })
+        });
+        const refined = await refineRes.json();
+        if (refineRes.ok && refined.success && Array.isArray(refined.chapters) && refined.chapters.length === numChapters) {
+          subtitle = refined.subtitle || subtitle;
+          bookDescription = refined.description || bookDescription;
+          chapterTitles = refined.chapters;
+          localContextByChapter = refined.localContextByChapter || localContextByChapter;
+          saved.subtitle = subtitle;
+          saved.bookDescription = bookDescription;
+          saved.chapterTitles = chapterTitles;
+          saved.localContextByChapter = localContextByChapter;
+          saveProgress(saved);
+        }
+      } catch (outlineError) {
+        console.warn('IA de sumário indisponível; mantendo esqueleto local:', outlineError.message);
+      }
+
+      // Busca os títulos finais também; resultados repetidos vêm do cache.
+      try {
+        const finalResearchRes = await apiFetch(base + '/api/prepare-book', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reservationId, niche, chapters: chapterTitles })
+        });
+        const finalResearch = await finalResearchRes.json();
+        if (finalResearchRes.ok && finalResearch.success) {
+          saved.researchByChapter = { ...(saved.researchByChapter || {}), ...(finalResearch.researchByChapter || {}) };
+          saveProgress(saved);
+        }
+      } catch (researchError) {
+        console.warn('Pesquisa dos títulos finais indisponível; usando referências já obtidas:', researchError.message);
+      }
+    }
+
+    setStep('outline', 'esqueleto pronto ✅', 'done');
 
     document.getElementById('outlineSubtitle').textContent = subtitle ? ('Subtítulo: ' + subtitle) : '';
     document.getElementById('outlineChapters').innerHTML = chapterTitles.map(c => '<li>' + c + '</li>').join('');
@@ -758,7 +837,20 @@ async function gerarLivroCompleto() {
     const chapterSteps = chapterTitles.map((t, i) => addStep('ch' + i, t));
     const stepBuild = addStep('build', 'Montando PDF e EPUB');
 
-    // 1) Capa gerada exclusivamente pelo Gemini.
+    function resumirEstadoDoLivro(items, maxChars = 900) {
+      const lines = [];
+      for (const item of items || []) {
+        if (!item || !item.content) continue;
+        const sentences = item.content.match(/[^.!?]+[.!?]?/g) || [];
+        const first = sentences[0] && sentences[0].trim();
+        const last = sentences.length > 1 && sentences[sentences.length - 1].trim();
+        lines.push(item.title + ': ' + [first, last && last !== first ? last : null].filter(Boolean).join(' '));
+      }
+      const summary = lines.join('\n');
+      return summary.length <= maxChars ? summary : summary.slice(0, maxChars - 3).trimEnd() + '...';
+    }
+
+    // 1) Gemini tenta a capa; servidor e navegador têm SVG local de reserva.
     const coverUrl = null;
     let coverBase64 = saved.coverBase64 || null;
     let coverMime = saved.coverMime || null;
@@ -777,7 +869,7 @@ async function gerarLivroCompleto() {
           coverBase64 = data.imageBase64;
           coverMime = data.mimeType || 'image/png';
           coverPreview.src = 'data:' + coverMime + ';base64,' + coverBase64;
-          setStep('cover', 'pronta (Gemini) ✅', 'done');
+          setStep('cover', data.local ? 'pronta localmente, sem chamada de IA ✅' : 'pronta ✅', 'done');
           coverPreview.style.display = 'block';
           saved.coverUrl = null;
           saved.coverBase64 = coverBase64;
@@ -787,33 +879,52 @@ async function gerarLivroCompleto() {
           throw new Error(data.error || 'O Gemini não conseguiu gerar a capa.');
         }
       } catch (e) {
-        setStep('cover', 'Gemini indisponível; livro seguirá sem capa', 'err');
+        coverBase64 = localCoverBase64(bookTitle, subtitle, author, niche);
+        coverMime = 'image/svg+xml';
+        coverPreview.src = 'data:' + coverMime + ';base64,' + coverBase64;
+        coverPreview.style.display = 'block';
+        saved.coverBase64 = coverBase64;
+        saved.coverMime = coverMime;
+        saveProgress(saved);
+        setStep('cover', 'Gemini indisponível; capa local pronta ✅', 'done');
       }
     }
 
     // 2) Capítulos — pula os que já estiverem prontos de uma tentativa anterior
     const chapters = saved.chapters || [];
+    saved.bookStateSummary = saved.bookStateSummary || resumirEstadoDoLivro(chapters);
     for (let i = 0; i < chapterTitles.length; i++) {
-      if (chapters[i] && chapters[i].content) {
+      if (chapters[i] && chapters[i].content && (chapters[i].completed || chapters[i].nextBlock === undefined)) {
         setStep('ch' + i, 'reaproveitado (retomando) ✅', 'done');
         continue;
       }
       const chapterTitle = chapterTitles[i];
-      let fullText = '';
-      for (let block = 1; block <= blocksPerChapter; block++) {
+      let fullText = chapters[i] && chapters[i].content ? chapters[i].content : '';
+      const firstBlock = chapters[i] && chapters[i].nextBlock ? chapters[i].nextBlock : 1;
+      for (let block = firstBlock; block <= blocksPerChapter; block++) {
         setStep('ch' + i, 'gerando bloco ' + block + '/' + blocksPerChapter + '...');
         const recentContext = fullText.slice(-1200);
+        const researchContext = [localContextByChapter && localContextByChapter[chapterTitle], saved.researchByChapter && saved.researchByChapter[chapterTitle]].filter(Boolean).join('\n');
+        const bookStateSourceChars = chapters.slice(0, i).reduce((total, chapter) => total + (chapter && chapter.content ? chapter.content.length : 0), 0);
         const text = await gerarBloco(base, {
           reservationId,
           bookTitle, chapterTitle, blockNumber: block, blocksPerChapter,
           niche, targetAudience: audience, tone, recentContext, bookDescription, language,
-          allChapterTitles: chapterTitles
+          allChapterTitles: chapterTitles,
+          researchContext,
+          researchPrepared: true,
+          bookStateSummary: saved.bookStateSummary || '',
+          bookStateSourceChars
         });
         fullText += (fullText ? '\n\n' : '') + text;
+        chapters[i] = { position: i + 1, title: chapterTitle, content: fullText, nextBlock: block + 1, completed: false };
+        saved.chapters = chapters;
+        saveProgress(saved);
       }
-      chapters[i] = { position: i + 1, title: chapterTitle, content: fullText };
+      chapters[i] = { position: i + 1, title: chapterTitle, content: fullText, nextBlock: blocksPerChapter + 1, completed: true };
       setStep('ch' + i, 'pronto ✅', 'done');
       saved.chapters = chapters;
+      saved.bookStateSummary = resumirEstadoDoLivro(chapters);
       saveProgress(saved); // salva assim que cada capítulo termina, não só no final
     }
 
@@ -821,7 +932,7 @@ async function gerarLivroCompleto() {
     setStep('build', 'montando...');
     const buildRes = await apiFetch(base + '/api/build-book', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ reservationId, title: bookTitle, subtitle, author, chapters, coverUrl, coverBase64, coverMime })
+      body: JSON.stringify({ reservationId, title: bookTitle, subtitle, author, niche, chapters, coverUrl, coverBase64, coverMime })
     });
     const buildData = await buildRes.json();
     if (!buildRes.ok || !buildData.success) throw new Error(buildData.details || buildData.error || 'Falha ao montar o livro.');

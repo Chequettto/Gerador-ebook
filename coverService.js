@@ -81,6 +81,65 @@ function generateCoverUrl({ title, niche, stylePreference }) {
   };
 }
 
+function escapeXml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function wrapTitle(value, maxLength = 20) {
+  const lines = [];
+  let line = '';
+  for (const word of String(value || '').split(/\s+/).filter(Boolean)) {
+    const candidate = line ? `${line} ${word}` : word;
+    if (candidate.length > maxLength && line) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = candidate;
+    }
+  }
+  if (line) lines.push(line);
+  return lines.slice(0, 5);
+}
+
+function generateLocalCoverSvg({ title, subtitle, author, niche }) {
+  const titleLines = wrapTitle(title, String(title || '').length > 44 ? 24 : 19);
+  const titleFontSize = String(title || '').length > 44 ? 54 : 68;
+  const titleY = 420;
+  const titleMarkup = titleLines.map((line, index) =>
+    `<text x="78" y="${titleY + index * (titleFontSize + 10)}" class="title">${escapeXml(line)}</text>`
+  ).join('\n');
+  const subtitleY = titleY + titleLines.length * (titleFontSize + 10) + 48;
+  const svg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="1200" viewBox="0 0 800 1200" role="img" aria-label="Capa do e-book ${escapeXml(title)}">
+  <rect width="800" height="1200" fill="#173b37"/>
+  <path d="M0 0H800V250C590 355 365 340 0 475Z" fill="#22534b"/>
+  <circle cx="675" cy="248" r="118" fill="#d5ec83" opacity="0.92"/>
+  <circle cx="675" cy="248" r="72" fill="#173b37" opacity="0.22"/>
+  <path d="M0 920C205 835 490 890 800 770V1200H0Z" fill="#c9573e"/>
+  <path d="M0 1000C230 910 510 975 800 860" fill="none" stroke="#f1dfbd" stroke-width="3" opacity="0.75"/>
+  <text x="80" y="116" class="kicker">GUIA PRÁTICO</text>
+  <text x="80" y="185" class="niche">${escapeXml(niche)}</text>
+  <path d="M80 300H225" stroke="#d5ec83" stroke-width="7"/>
+  ${titleMarkup}
+  ${subtitle ? `<text x="80" y="${Math.min(subtitleY, 830)}" class="subtitle">${escapeXml(subtitle)}</text>` : ''}
+  <text x="80" y="1090" class="author">${escapeXml(author || 'Autor')}</text>
+  <style>
+    .kicker{font:700 20px sans-serif;letter-spacing:2px;fill:#d5ec83}
+    .niche{font:400 24px sans-serif;fill:#d9e3da}
+    .title{font:600 ${titleFontSize}px Georgia,serif;fill:#fffaf0}
+    .subtitle{font:400 25px sans-serif;fill:#173b37}
+    .author{font:600 25px sans-serif;fill:#fffaf0}
+  </style>
+</svg>`;
+  return Buffer.from(svg, 'utf8');
+}
+
 module.exports = {
   generateCoverUrl,
+  generateLocalCoverSvg,
 };

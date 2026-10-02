@@ -7,10 +7,12 @@ const cors = require('cors');
 const path = require('path');
 const crypto = require('crypto');
 
-const { generateBlock, generateOutline, generateCoverImageWithGemini, pools } = require('./aiService');
+const { generateBlock, generateOutline, refineOutline, generateCoverImageWithGemini, pools } = require('./aiService');
 const { buildPdf, buildEpub } = require('./bookBuildService');
+const { generateLocalCoverSvg } = require('./coverService');
 const { PLANS, findOrCreateCustomer, createLifetimeCharge, createMonthlySubscription, getPaymentStatus } = require('./asaasService');
 const researchEngine = require('./research/researchEngine');
+const { compressReferenceText } = require('./promptCompression');
 const { getPool, initializeStore } = require('./accountStore');
 const {
   destroySession,
@@ -180,12 +182,11 @@ app.post('/api/ebooks/reserve', loadOptionalUser, async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // POST /api/generate-block
-// Gera 1 bloco (~350-400 palavras) de um capítulo, passando pela esteira
-// tripla sequencial (Gemini -> Groq -> Mistral). Dividido em blocos pequenos
-// para nunca ultrapassar o timeout de 30s do Render.
+// Recebe referências já preparadas e devolve 1 bloco após uma chamada final
+// de polimento. Dividido em blocos pequenos para caber no limite do Render.
 // ---------------------------------------------------------------------------
 app.post('/api/generate-block', loadOptionalUser, requireEbookReservation, async (req, res) => {
-  const { bookTitle, chapterTitle, blockNumber, niche, targetAudience, tone, recentContext, bookDescription, blocksPerChapter, language, allChapterTitles } = req.body || {};
+  const { bookTitle, chapterTitle, blockNumber, niche, targetAudience, tone, recentContext, bookDescription, blocksPerChapter, language, allChapterTitles, bookStateSummary, researchContext: preparedResearchContext, researchPrepared } = req.body || {};
 
   const missing = [];
   if (!bookTitle) missing.push('bookTitle');
@@ -216,14 +217,20 @@ app.post('/api/generate-block', loadOptionalUser, requireEbookReservation, async
     // cache). Se a pesquisa falhar por qualquer motivo, a geração continua
     // normalmente sem esse contexto extra — nunca trava o e-book por causa
     // disso, como pedido.
-    let researchContext = '';
+    let researchContext = typeof preparedResearchContext === 'string'
+      ? compressReferenceText(preparedResearchContext, `${niche} ${chapterTitle}`, 3600)
+      : '';
     let researchStats = null;
-    try {
-      const researchResult = await researchEngine.research({ topic: niche, chapterTitle });
-      researchContext = researchResult.context;
-      researchStats = researchResult.stats;
-    } catch (researchError) {
-      console.error('Research Engine falhou, seguindo sem contexto extra:', researchError.message);
+    if (researchPrepared) {
+      console.log(`[fase-rag] Reutilizando micro-contexto preparado para "${chapterTitle}".`);
+    } else {
+      try {
+        const researchResult = await researchEngine.research({ topic: niche, chapterTitle });
+        researchContext = compressReferenceText(researchResult.context, `${niche} ${chapterTitle}`, 3600);
+        researchStats = researchResult.stats;
+      } catch (researchError) {
+        console.error('Research Engine falhou, seguindo sem contexto extra:', researchError.message);
+      }
     }
 
     const result = await generateBlock({
@@ -239,6 +246,7 @@ app.post('/api/generate-block', loadOptionalUser, requireEbookReservation, async
       language: language || 'português do Brasil',
       allChapterTitles: Array.isArray(allChapterTitles) ? allChapterTitles : [],
       researchContext,
+      bookStateSummary: bookStateSummary || '',
     });
 
     return res.json({
@@ -310,9 +318,64 @@ app.post('/api/generate-outline', loadOptionalUser, requireEbookReservation, asy
   }
 });
 
+// Pré-carrega pesquisa pública de todos os capítulos antes de chamar qualquer IA.
+app.post('/api/prepare-book', loadOptionalUser, requireEbookReservation, async (req, res) => {
+  const { niche, chapters } = req.body || {};
+  if (!niche || !Array.isArray(chapters) || chapters.length === 0 || chapters.length > 30) {
+    return res.status(400).json({ error: 'Informe o nicho e uma lista de 1 a 30 capítulos.' });
+  }
+
+  const results = [];
+  for (let index = 0; index < chapters.length; index += 2) {
+    const batch = chapters.slice(index, index + 2);
+    results.push(...await Promise.allSettled(batch.map((chapterTitle) =>
+      researchEngine.research({ topic: niche, chapterTitle })
+    )));
+  }
+  const researchByChapter = {};
+  let tokensBefore = 0;
+  let tokensAfter = 0;
+  results.forEach((result, index) => {
+    const chapterTitle = chapters[index];
+    if (result.status === 'fulfilled') {
+      researchByChapter[chapterTitle] = result.value.context;
+      tokensBefore += result.value.stats.tokensBeforeRaw || 0;
+      tokensAfter += result.value.stats.tokensAfter || 0;
+    } else {
+      researchByChapter[chapterTitle] = '';
+      console.error(`[fase-rag] Pesquisa pública indisponível para "${chapterTitle}":`, result.reason && result.reason.message);
+    }
+  });
+  console.log(`[fase-rag] Pesquisa pública preparada antes da IA: estimativa ${tokensBefore} -> ${tokensAfter} tokens de referência.`);
+  return res.json({ success: true, researchByChapter, savingsEstimate: Math.max(0, tokensBefore - tokensAfter) });
+});
+
+app.post('/api/refine-outline', loadOptionalUser, requireEbookReservation, async (req, res) => {
+  const { bookTitle, niche, targetAudience, tone, numChapters, language, chapters, researchContext } = req.body || {};
+  if (!bookTitle || !niche || !Array.isArray(chapters) || chapters.length !== Number(numChapters)) {
+    return res.status(400).json({ error: 'Envie os dados do livro e o esqueleto local completo.' });
+  }
+  try {
+    const outline = await refineOutline({
+      bookTitle,
+      niche,
+      targetAudience,
+      tone,
+      numChapters: Number(numChapters),
+      language,
+      chapters,
+      researchContext: typeof researchContext === 'string' ? researchContext : '',
+    });
+    return res.json({ success: true, ...outline });
+  } catch (error) {
+    console.error('Falha inesperada ao refinar o sumário; mantendo esqueleto local:', error.message);
+    return res.json({ success: true, chapters, subtitle: '', description: '', localFallback: true });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // POST /api/generate-cover
-// Gera capas exclusivamente com o Gemini.
+// Gera a capa em SVG local, sem consumir chamadas ou créditos de IA.
 // Body: { title, subtitle?, author?, niche, stylePreference? }
 // ---------------------------------------------------------------------------
 app.post('/api/generate-cover', loadOptionalUser, requireEbookReservation, async (req, res) => {
@@ -326,25 +389,37 @@ app.post('/api/generate-cover', loadOptionalUser, requireEbookReservation, async
   }
 
   try {
-    const image = await generateCoverImageWithGemini({
-      title,
-      subtitle: subtitle || '',
-      author: author || '',
-      niche,
-      stylePreference,
-    });
+    let image;
+    let local = false;
+    try {
+      image = await generateCoverImageWithGemini({
+        title,
+        subtitle: subtitle || '',
+        author: author || '',
+        niche,
+        stylePreference,
+      });
+    } catch (error) {
+      console.error('Gemini indisponível para a capa; usando desenho local:', error.message);
+      image = {
+        bytes: generateLocalCoverSvg({ title, subtitle: subtitle || '', author: author || '', niche }),
+        mimeType: 'image/svg+xml',
+      };
+      local = true;
+    }
     return res.json({
       success: true,
       imageBase64: image.bytes.toString('base64'),
       mimeType: image.mimeType,
+      local,
       title,
       niche,
     });
   } catch (error) {
-    console.error('Gemini falhou ao gerar a capa:', error.message);
+    console.error('Falha ao gerar a capa local:', error.message);
     return res.status(503).json({
       success: false,
-      error: 'O Gemini não conseguiu gerar a capa. Tente novamente mais tarde.',
+      error: 'Não foi possível criar a capa local.',
       details: error.message,
     });
   }
@@ -363,7 +438,7 @@ app.post('/api/generate-cover', loadOptionalUser, requireEbookReservation, async
 // }
 // ---------------------------------------------------------------------------
 app.post('/api/build-book', loadOptionalUser, requireEbookReservation, async (req, res) => {
-  const { title, subtitle, author, chapters, coverBase64, coverMime: coverMimeIn } = req.body || {};
+  const { title, subtitle, author, niche, chapters, coverBase64, coverMime: coverMimeIn } = req.body || {};
 
   if (!title || !author || !Array.isArray(chapters) || chapters.length === 0) {
     return res.status(400).json({
@@ -375,7 +450,7 @@ app.post('/api/build-book', loadOptionalUser, requireEbookReservation, async (re
     let coverBytes = null;
     let coverMime = null;
     if (coverBase64) {
-      // Capa já veio pronta em base64 (modo Gemini) — não precisa baixar nada.
+      // Capa local já veio em base64; não precisa baixar nada.
       coverBytes = new Uint8Array(Buffer.from(coverBase64, 'base64'));
       coverMime = coverMimeIn || 'image/png';
     }
@@ -384,6 +459,7 @@ app.post('/api/build-book', loadOptionalUser, requireEbookReservation, async (re
       title,
       subtitle: subtitle || null,
       author,
+      niche: niche || '',
       chapters: chapters.map((c, i) => ({
         position: c.position || i + 1,
         title: c.title || `Capítulo ${i + 1}`,

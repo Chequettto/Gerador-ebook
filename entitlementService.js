@@ -86,7 +86,7 @@ async function findReservation(userId, reservationId, ipHash) {
     `SELECT id, is_free, status FROM ebook_reservations
       WHERE id = $1 AND (
         ($2::BIGINT IS NOT NULL AND user_id = $2)
-        OR (user_id IS NULL AND ip_hash = $3)
+        OR (user_id IS NULL AND ($2::BIGINT IS NULL OR ip_hash = $3))
       )`,
     [reservationId, userId || null, ipHash || null]
   );
@@ -98,7 +98,7 @@ async function completeReservation(userId, reservationId, ipHash) {
     `UPDATE ebook_reservations SET status = 'completed', completed_at = NOW()
       WHERE id = $1 AND status = 'pending' AND (
         ($2::BIGINT IS NOT NULL AND user_id = $2)
-        OR (user_id IS NULL AND ip_hash = $3)
+        OR (user_id IS NULL AND ($2::BIGINT IS NULL OR ip_hash = $3))
       )
       RETURNING id`,
     [reservationId, userId || null, ipHash || null]

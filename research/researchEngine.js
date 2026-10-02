@@ -26,7 +26,10 @@ const connectors = [
   require('./connectors/openalex'),
   require('./connectors/crossref'),
   require('./connectors/openlibrary'),
+  require('./connectors/googlebooks'),
   require('./connectors/gutenberg'),
+  require('./connectors/wikisource-pt'),
+  require('./connectors/wikisource-global'),
   require('./connectors/internetarchive'),
   require('./connectors/europeana'), // pula sozinho se não tiver EUROPEANA_API_KEY
 ];
@@ -87,7 +90,12 @@ async function research({ topic, chapterTitle, tokenBudget }) {
   const budget = tokenBudget || DEFAULT_TOKEN_BUDGET;
   const sourceStats = {};
 
-  const settled = await Promise.allSettled(connectors.map((c) => c.search(query)));
+  const settled = await Promise.allSettled(connectors.map(async (connector) => {
+    console.log(`[busca-global] Buscando em ${connector.name}...`);
+    const items = await connector.search(query);
+    console.log(`[busca-global] ${connector.name}: ${items.length} resultados.`);
+    return items;
+  }));
 
   let rawItems = [];
   for (let i = 0; i < connectors.length; i += 1) {
@@ -98,6 +106,7 @@ async function research({ topic, chapterTitle, tokenBudget }) {
       rawItems.push(...result.value);
     } else {
       sourceStats[name] = { found: 0, error: result.reason ? result.reason.message : 'falhou' };
+      console.warn(`[busca-global] ${name}: indisponível (${sourceStats[name].error}).`);
     }
   }
 
@@ -149,6 +158,7 @@ async function research({ topic, chapterTitle, tokenBudget }) {
     `[research-engine] "${query}" -> ${foundCount} encontrados, ${duplicateCount} duplicados removidos, ` +
       `${selected.length} selecionados, ${tokensBeforeRaw}->${tokensAfter} tokens (${savingsPercent}% de economia).`
   );
+  console.log('[busca-global] Esqueleto apoiado por acervos públicos modelado com sucesso.');
 
   return result;
 }
